@@ -5,6 +5,7 @@ import {
   createWalletWithPreferences,
   deleteWalletById,
   findWalletById,
+  findWalletByUserIdAndAddress,
   listWalletsByUserId,
   updateWalletById
 } from './wallets.repository.js';
@@ -37,6 +38,39 @@ export async function ensureUserExists(userId) {
 export async function createWallet(payload) {
   await ensureUserExists(payload.userId);
 
+  const existingWallet = await findWalletByUserIdAndAddress(payload.userId, payload.address);
+
+  if (existingWallet) {
+    const updatedExistingWallet = await updateWalletById(existingWallet.id, payload.userId, {
+      address: payload.address,
+      label: payload.label,
+      trackTypes: payload.trackTypes,
+      enabledChains: payload.enabledChains
+    });
+
+    if (!updatedExistingWallet) {
+      throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
+    }
+
+    try {
+      await syncAlchemyWebhookAddressOnWalletUpdate(existingWallet, updatedExistingWallet);
+    } catch (error) {
+      walletsServiceLogger.error(
+        {
+          err: error,
+          walletId: updatedExistingWallet.id,
+          previousAddress: existingWallet.address,
+          nextAddress: updatedExistingWallet.address,
+          previousEnabledChains: existingWallet.enabledChains,
+          nextEnabledChains: updatedExistingWallet.enabledChains
+        },
+        'Unexpected Alchemy webhook sync error after address-centric wallet merge'
+      );
+    }
+
+    return updatedExistingWallet;
+  }
+
   try {
     const wallet = await createWalletWithPreferences(payload);
 
@@ -64,25 +98,31 @@ export async function listWallets(userId) {
 }
 
 export async function removeWallet(walletId, userId) {
+  const existingWallet = await findWalletById(walletId, userId);
+
+  if (!existingWallet) {
+    throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
+  }
+
   const deletedWallet = await deleteWalletById(walletId, userId);
 
   if (!deletedWallet) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
   }
 
-  const existingWallet = await findWalletById(walletId, userId);
+  const persistedWallet = await findWalletById(walletId, userId);
 
-  if (existingWallet) {
+  if (persistedWallet) {
     throw new HttpError(500, 'WALLET_DELETE_VERIFICATION_FAILED', 'Wallet deletion could not be verified.', {
       expose: false
     });
   }
 
   try {
-    await syncAlchemyWebhookAddressOnWalletDelete(deletedWallet);
+    await syncAlchemyWebhookAddressOnWalletDelete(existingWallet);
   } catch (error) {
     walletsServiceLogger.error(
-      { err: error, walletId: deletedWallet.id, chainId: deletedWallet.chainId, address: deletedWallet.address },
+      { err: error, walletId: existingWallet.id, enabledChains: existingWallet.enabledChains, address: existingWallet.address },
       'Unexpected Alchemy webhook sync error after wallet delete'
     );
   }
@@ -103,7 +143,7 @@ export async function updateWallet(walletId, userId, payload) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
   }
 
-  if (payload.address !== undefined) {
+  if (payload.address !== undefined || payload.enabledChains !== undefined) {
     try {
       await syncAlchemyWebhookAddressOnWalletUpdate(existingWallet, updatedWallet);
     } catch (error) {
@@ -113,7 +153,8 @@ export async function updateWallet(walletId, userId, payload) {
           walletId: updatedWallet.id,
           previousAddress: existingWallet.address,
           nextAddress: updatedWallet.address,
-          chainId: updatedWallet.chainId
+          previousEnabledChains: existingWallet.enabledChains,
+          nextEnabledChains: updatedWallet.enabledChains
         },
         'Unexpected Alchemy webhook sync error after wallet update'
       );

@@ -111,7 +111,14 @@ async function enrichWalletsWithEnabledChains(wallets) {
   }));
 }
 
-export async function createWalletWithPreferences({ userId, chainId, address, label, trackTypes }) {
+export async function createWalletWithPreferences({
+  userId,
+  chainId,
+  address,
+  label,
+  trackTypes,
+  enabledChains = []
+}) {
   const client = await pool.connect();
 
   try {
@@ -127,15 +134,11 @@ export async function createWalletWithPreferences({ userId, chainId, address, la
     );
 
     const wallet = insertWalletResult.rows[0];
+    const normalizedEnabledChains = [...new Set(
+      enabledChains.length > 0 ? enabledChains : (chainId ? [chainId] : [])
+    )];
 
-    await client.query(
-      `
-        INSERT INTO wallet_chains (wallet_id, chain_id, enabled)
-        VALUES ($1, $2, TRUE)
-        ON CONFLICT (wallet_id, chain_id) DO NOTHING
-      `,
-      [wallet.id, chainId]
-    );
+    await upsertWalletChains(client, wallet.id, normalizedEnabledChains);
 
     for (const trackType of trackTypes) {
       await client.query(
@@ -158,7 +161,68 @@ export async function createWalletWithPreferences({ userId, chainId, address, la
   }
 }
 
-export async function updateWalletById(walletId, userId, { address, label, trackTypes }) {
+export async function findWalletByUserIdAndAddress(userId, address) {
+  const result = await query(
+    `
+      SELECT
+        tw.id,
+        tw.user_id,
+        tw.chain_id,
+        tw.address,
+        tw.label,
+        tw.status,
+        tw.created_at,
+        tw.updated_at,
+        COALESCE(
+          ARRAY_AGG(wtp.track_type::text ORDER BY wtp.track_type::text)
+          FILTER (WHERE wtp.track_type IS NOT NULL),
+          ARRAY[]::text[]
+        ) AS track_types
+      FROM tracked_wallets tw
+      LEFT JOIN wallet_track_preferences wtp ON wtp.wallet_id = tw.id
+      WHERE tw.user_id = $1
+        AND LOWER(tw.address) = LOWER($2)
+      GROUP BY tw.id
+      ORDER BY
+        CASE WHEN tw.status = 'active' THEN 0 ELSE 1 END,
+        tw.created_at ASC
+      LIMIT 1
+    `,
+    [userId, address]
+  );
+
+  if (!result.rows[0]) {
+    return null;
+  }
+
+  const wallet = mapWallet(result.rows[0]);
+  const enabledChains = await listWalletChains(wallet.id);
+
+  return {
+    ...wallet,
+    enabledChains: enabledChains.length > 0 ? enabledChains : (wallet.chainId ? [wallet.chainId] : [])
+  };
+}
+
+async function upsertWalletChains(client, walletId, enabledChains) {
+  const normalizedEnabledChains = [...new Set(enabledChains)];
+
+  for (const chainId of normalizedEnabledChains) {
+    await client.query(
+      `
+        INSERT INTO wallet_chains (wallet_id, chain_id, enabled, updated_at)
+        VALUES ($1, $2, TRUE, NOW())
+        ON CONFLICT (wallet_id, chain_id)
+        DO UPDATE SET
+          enabled = TRUE,
+          updated_at = NOW()
+      `,
+      [walletId, chainId]
+    );
+  }
+}
+
+export async function updateWalletById(walletId, userId, { address, label, trackTypes, enabledChains }) {
   const client = await pool.connect();
 
   try {
@@ -231,6 +295,21 @@ export async function updateWalletById(walletId, userId, { address, label, track
         `,
         [walletId, userId]
       );
+    }
+
+    if (enabledChains !== undefined) {
+      await client.query(
+        `
+          UPDATE wallet_chains
+          SET enabled = FALSE,
+              updated_at = NOW()
+          WHERE wallet_id = $1
+            AND chain_id <> ALL($2::text[])
+        `,
+        [walletId, enabledChains]
+      );
+
+      await upsertWalletChains(client, walletId, enabledChains);
     }
 
     await client.query('COMMIT');
@@ -400,8 +479,11 @@ export async function findTrackedWalletsByAddresses(chainId, addresses) {
         ) AS track_types
       FROM tracked_wallets tw
       LEFT JOIN wallet_track_preferences wtp ON wtp.wallet_id = tw.id
-      WHERE tw.chain_id = $1
-        AND tw.status = 'active'
+      INNER JOIN wallet_chains wc
+        ON wc.wallet_id = tw.id
+       AND wc.chain_id = $1
+       AND wc.enabled = TRUE
+      WHERE tw.status = 'active'
         AND LOWER(tw.address) = ANY($2::text[])
       GROUP BY tw.id
       ORDER BY tw.created_at ASC
@@ -417,8 +499,11 @@ export async function countActiveWalletsByChainIdAndAddress(chainId, address) {
     `
       SELECT COUNT(*)::int AS active_wallet_count
       FROM tracked_wallets tw
-      WHERE tw.chain_id = $1
-        AND tw.status = 'active'
+      INNER JOIN wallet_chains wc
+        ON wc.wallet_id = tw.id
+       AND wc.chain_id = $1
+       AND wc.enabled = TRUE
+      WHERE tw.status = 'active'
         AND LOWER(tw.address) = LOWER($2)
     `,
     [chainId, address]
@@ -432,8 +517,11 @@ export async function listActiveTrackedAddressesByChainId(chainId) {
     `
       SELECT DISTINCT LOWER(tw.address) AS address
       FROM tracked_wallets tw
-      WHERE tw.chain_id = $1
-        AND tw.status = 'active'
+      INNER JOIN wallet_chains wc
+        ON wc.wallet_id = tw.id
+       AND wc.chain_id = $1
+       AND wc.enabled = TRUE
+      WHERE tw.status = 'active'
       ORDER BY LOWER(tw.address) ASC
     `,
     [chainId]
@@ -443,6 +531,7 @@ export async function listActiveTrackedAddressesByChainId(chainId) {
 }
 
 export async function deleteWalletById(walletId, userId) {
+  const enabledChains = await listWalletChains(walletId);
   const result = await query(
     `
       DELETE FROM tracked_wallets
@@ -453,6 +542,9 @@ export async function deleteWalletById(walletId, userId) {
   );
 
   return result.rows[0]
-    ? mapWallet({ ...result.rows[0], track_types: [] }, result.rows[0].chain_id ? [result.rows[0].chain_id] : [])
+    ? mapWallet(
+        { ...result.rows[0], track_types: [] },
+        enabledChains.length > 0 ? enabledChains : (result.rows[0].chain_id ? [result.rows[0].chain_id] : [])
+      )
     : null;
 }

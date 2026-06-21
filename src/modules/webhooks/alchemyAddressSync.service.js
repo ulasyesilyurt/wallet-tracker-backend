@@ -17,6 +17,14 @@ function normalizeAddress(address) {
   return typeof address === 'string' ? address.trim().toLowerCase() : '';
 }
 
+function getWalletSyncChains(wallet) {
+  if (Array.isArray(wallet?.enabledChains) && wallet.enabledChains.length > 0) {
+    return [...new Set(wallet.enabledChains)];
+  }
+
+  return wallet?.chainId ? [wallet.chainId] : [];
+}
+
 function getAlchemyAddressActivityWebhookId(chainId) {
   const chainConfig = getChainConfigById(chainId);
 
@@ -417,52 +425,76 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
 }
 
 export async function syncAlchemyWebhookAddressOnWalletCreate(wallet) {
-  await addAddressToAlchemyWebhook({
-    chainId: wallet.chainId,
-    address: wallet.address,
-    walletId: wallet.id,
-    reason: 'wallet_created'
-  });
+  for (const chainId of getWalletSyncChains(wallet)) {
+    await addAddressToAlchemyWebhook({
+      chainId,
+      address: wallet.address,
+      walletId: wallet.id,
+      reason: 'wallet_created'
+    });
+  }
 }
 
 export async function syncAlchemyWebhookAddressOnWalletDelete(wallet) {
-  await removeAddressFromAlchemyWebhookIfUnused({
-    chainId: wallet.chainId,
-    address: wallet.address,
-    walletId: wallet.id,
-    reason: 'wallet_deleted'
-  });
+  for (const chainId of getWalletSyncChains(wallet)) {
+    await removeAddressFromAlchemyWebhookIfUnused({
+      chainId,
+      address: wallet.address,
+      walletId: wallet.id,
+      reason: 'wallet_deleted'
+    });
+  }
 }
 
 export async function syncAlchemyWebhookAddressOnWalletUpdate(previousWallet, updatedWallet) {
   const previousAddress = normalizeAddress(previousWallet?.address);
   const nextAddress = normalizeAddress(updatedWallet?.address);
+  const previousChains = getWalletSyncChains(previousWallet);
+  const nextChains = getWalletSyncChains(updatedWallet);
 
-  if (!previousWallet || !updatedWallet || previousAddress === nextAddress) {
+  if (!previousWallet || !updatedWallet) {
+    return;
+  }
+
+  const addressChanged = previousAddress !== nextAddress;
+  const chainsAdded = nextChains.filter((chainId) => !previousChains.includes(chainId));
+  const chainsRemoved = previousChains.filter((chainId) => !nextChains.includes(chainId));
+
+  if (!addressChanged && chainsAdded.length === 0 && chainsRemoved.length === 0) {
     alchemyAddressSyncLogger.info(
       {
         walletId: updatedWallet?.id ?? previousWallet?.id ?? null,
         previousAddress,
-        nextAddress
+        nextAddress,
+        previousChains,
+        nextChains
       },
-      'Alchemy webhook address sync update skipped because wallet address did not change'
+      'Alchemy webhook address sync update skipped because wallet address and enabled chains did not change'
     );
     return;
   }
 
-  await addAddressToAlchemyWebhook({
-    chainId: updatedWallet.chainId,
-    address: updatedWallet.address,
-    walletId: updatedWallet.id,
-    reason: 'wallet_address_updated_add_new'
-  });
+  const chainsToAdd = addressChanged ? nextChains : chainsAdded;
 
-  await removeAddressFromAlchemyWebhookIfUnused({
-    chainId: previousWallet.chainId,
-    address: previousWallet.address,
-    walletId: updatedWallet.id,
-    reason: 'wallet_address_updated_remove_old'
-  });
+  for (const chainId of chainsToAdd) {
+    await addAddressToAlchemyWebhook({
+      chainId,
+      address: updatedWallet.address,
+      walletId: updatedWallet.id,
+      reason: addressChanged ? 'wallet_address_updated_add_new' : 'wallet_chain_enabled'
+    });
+  }
+
+  const chainsToRemove = addressChanged ? previousChains : chainsRemoved;
+
+  for (const chainId of chainsToRemove) {
+    await removeAddressFromAlchemyWebhookIfUnused({
+      chainId,
+      address: previousWallet.address,
+      walletId: updatedWallet.id,
+      reason: addressChanged ? 'wallet_address_updated_remove_old' : 'wallet_chain_disabled'
+    });
+  }
 }
 
 export async function addAddressToAlchemyWebhookSync({ chainId, address, reason = 'manual_sync', walletId = null }) {

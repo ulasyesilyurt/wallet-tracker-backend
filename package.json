@@ -1,0 +1,31 @@
+{
+  "name": "wallet-tracker-backend",
+  "version": "1.0.0",
+  "description": "Backend service for tracking blockchain wallet activity and sending push notifications.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "migrate": "node src/scripts/runMigrations.js",
+    "tracker:ethereum": "node src/scripts/runEthereumTracker.js",
+    "seed:portfolio-snapshots": "node src/scripts/seedPortfolioSnapshots.js",
+    "check:wallet-holdings": "node src/scripts/checkWalletHoldings.js",
+    "reconcile:alchemy-webhook-addresses": "node src/scripts/reconcileAlchemyWebhookAddresses.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.16.0",
+    "express": "^5.1.0",
+    "firebase-admin": "^13.0.2",
+    "helmet": "^8.0.0",
+    "pg": "^8.13.1",
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0",
+    "zod": "^3.24.1"
+  }
+}

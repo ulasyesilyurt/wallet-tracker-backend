@@ -16,18 +16,99 @@ function normalizeTrackTypes(value) {
   return [];
 }
 
-function mapWallet(row) {
+function normalizeEnabledChains(value, fallbackChainId = null) {
+  if (Array.isArray(value)) {
+    const normalized = value.filter(Boolean);
+
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+
+  if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
+    const normalized = value
+      .slice(1, -1)
+      .split(',')
+      .filter(Boolean);
+
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+
+  return fallbackChainId ? [fallbackChainId] : [];
+}
+
+function mapWallet(row, enabledChainsOverride = null) {
+  const chainId = row.chain_id;
+
   return {
     id: row.id,
     userId: row.user_id,
-    chainId: row.chain_id,
+    chainId,
     address: row.address,
     label: row.label,
     status: row.status,
     trackTypes: normalizeTrackTypes(row.track_types),
+    enabledChains: enabledChainsOverride ?? normalizeEnabledChains(row.enabled_chains, chainId),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+export async function listWalletChains(walletId) {
+  const result = await query(
+    `
+      SELECT wc.chain_id
+      FROM wallet_chains wc
+      WHERE wc.wallet_id = $1
+        AND wc.enabled = TRUE
+      ORDER BY wc.created_at ASC, wc.chain_id ASC
+    `,
+    [walletId]
+  );
+
+  return result.rows.map((row) => row.chain_id).filter(Boolean);
+}
+
+export async function listWalletChainsForWalletIds(walletIds) {
+  if (walletIds.length === 0) {
+    return new Map();
+  }
+
+  const result = await query(
+    `
+      SELECT wc.wallet_id, wc.chain_id
+      FROM wallet_chains wc
+      WHERE wc.wallet_id = ANY($1::uuid[])
+        AND wc.enabled = TRUE
+      ORDER BY wc.created_at ASC, wc.chain_id ASC
+    `,
+    [walletIds]
+  );
+
+  const chainsByWalletId = new Map();
+
+  for (const row of result.rows) {
+    const existingChains = chainsByWalletId.get(row.wallet_id) ?? [];
+    existingChains.push(row.chain_id);
+    chainsByWalletId.set(row.wallet_id, existingChains);
+  }
+
+  return chainsByWalletId;
+}
+
+async function enrichWalletsWithEnabledChains(wallets) {
+  if (wallets.length === 0) {
+    return wallets;
+  }
+
+  const chainsByWalletId = await listWalletChainsForWalletIds(wallets.map((wallet) => wallet.id));
+
+  return wallets.map((wallet) => ({
+    ...wallet,
+    enabledChains: chainsByWalletId.get(wallet.id) ?? (wallet.chainId ? [wallet.chainId] : [])
+  }));
 }
 
 export async function createWalletWithPreferences({ userId, chainId, address, label, trackTypes }) {
@@ -46,6 +127,15 @@ export async function createWalletWithPreferences({ userId, chainId, address, la
     );
 
     const wallet = insertWalletResult.rows[0];
+
+    await client.query(
+      `
+        INSERT INTO wallet_chains (wallet_id, chain_id, enabled)
+        VALUES ($1, $2, TRUE)
+        ON CONFLICT (wallet_id, chain_id) DO NOTHING
+      `,
+      [wallet.id, chainId]
+    );
 
     for (const trackType of trackTypes) {
       await client.query(
@@ -179,7 +269,17 @@ export async function findWalletById(walletId, userId) {
     [walletId, userId]
   );
 
-  return result.rows[0] ? mapWallet(result.rows[0]) : null;
+  if (!result.rows[0]) {
+    return null;
+  }
+
+  const wallet = mapWallet(result.rows[0]);
+  const enabledChains = await listWalletChains(wallet.id);
+
+  return {
+    ...wallet,
+    enabledChains: enabledChains.length > 0 ? enabledChains : (wallet.chainId ? [wallet.chainId] : [])
+  };
 }
 
 export async function findWalletByIdOnly(walletId) {
@@ -207,7 +307,17 @@ export async function findWalletByIdOnly(walletId) {
     [walletId]
   );
 
-  return result.rows[0] ? mapWallet(result.rows[0]) : null;
+  if (!result.rows[0]) {
+    return null;
+  }
+
+  const wallet = mapWallet(result.rows[0]);
+  const enabledChains = await listWalletChains(wallet.id);
+
+  return {
+    ...wallet,
+    enabledChains: enabledChains.length > 0 ? enabledChains : (wallet.chainId ? [wallet.chainId] : [])
+  };
 }
 
 export async function listWalletsByUserId(userId) {
@@ -236,7 +346,7 @@ export async function listWalletsByUserId(userId) {
     [userId]
   );
 
-  return result.rows.map(mapWallet);
+  return enrichWalletsWithEnabledChains(result.rows.map((row) => mapWallet(row)));
 }
 
 export async function listWalletsForSnapshotJob() {
@@ -264,7 +374,7 @@ export async function listWalletsForSnapshotJob() {
     `
   );
 
-  return result.rows.map(mapWallet);
+  return enrichWalletsWithEnabledChains(result.rows.map((row) => mapWallet(row)));
 }
 
 export async function findTrackedWalletsByAddresses(chainId, addresses) {
@@ -299,7 +409,7 @@ export async function findTrackedWalletsByAddresses(chainId, addresses) {
     [chainId, addresses.map((address) => address.toLowerCase())]
   );
 
-  return result.rows.map(mapWallet);
+  return enrichWalletsWithEnabledChains(result.rows.map((row) => mapWallet(row)));
 }
 
 export async function countActiveWalletsByChainIdAndAddress(chainId, address) {
@@ -342,5 +452,7 @@ export async function deleteWalletById(walletId, userId) {
     [walletId, userId]
   );
 
-  return result.rows[0] ? mapWallet({ ...result.rows[0], track_types: [] }) : null;
+  return result.rows[0]
+    ? mapWallet({ ...result.rows[0], track_types: [] }, result.rows[0].chain_id ? [result.rows[0].chain_id] : [])
+    : null;
 }

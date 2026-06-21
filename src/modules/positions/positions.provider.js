@@ -1,5 +1,6 @@
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
+import { getChainConfigById } from '../chains/chains.config.js';
 
 const positionsProviderLogger = logger.child({ module: 'positions-provider' });
 const ZERION_API_BASE_URL = 'https://api.zerion.io/v1';
@@ -41,7 +42,7 @@ function buildPositionsCacheKey(wallet) {
   return `${wallet.chainId}:${wallet.address.toLowerCase()}`;
 }
 
-export function peekCachedEthereumMainnetPositions(wallet) {
+export function peekCachedWalletPositions(wallet) {
   const cacheKey = buildPositionsCacheKey(wallet);
   const cachedEntry = positionsCache.get(cacheKey);
 
@@ -222,12 +223,34 @@ async function fetchJson(url, options) {
   return data;
 }
 
-async function fetchAllWalletPositions(walletAddress) {
+function getZerionChainId(chainId) {
+  return getChainConfigById(chainId)?.zerionChainId ?? null;
+}
+
+function isUnsupportedZerionChainError(error) {
+  const status = error?.status ?? null;
+
+  if (![400, 404, 422].includes(status)) {
+    return false;
+  }
+
+  const message = `${error?.message ?? ''} ${JSON.stringify(error?.responseBody ?? {})}`.toLowerCase();
+
+  return (
+    message.includes('unsupported') ||
+    message.includes('chain') ||
+    message.includes('filter[chain_ids]') ||
+    message.includes('invalid') ||
+    message.includes('not supported')
+  );
+}
+
+async function fetchAllWalletPositions(walletAddress, zerionChainId) {
   const headers = {
     accept: 'application/json',
     authorization: buildZerionAuthorizationHeader()
   };
-  let nextUrl = `${ZERION_API_BASE_URL}/wallets/${walletAddress}/positions/?filter[chain_ids]=ethereum&filter[positions]=only_complex&currency=usd&sort=-value&page[size]=100`;
+  let nextUrl = `${ZERION_API_BASE_URL}/wallets/${walletAddress}/positions/?filter[chain_ids]=${encodeURIComponent(zerionChainId)}&filter[positions]=only_complex&currency=usd&sort=-value&page[size]=100`;
   const aggregatedData = [];
   const aggregatedIncluded = [];
 
@@ -247,8 +270,8 @@ async function fetchAllWalletPositions(walletAddress) {
   };
 }
 
-export async function fetchEthereumMainnetPositions(wallet) {
-  const cachedResponse = peekCachedEthereumMainnetPositions(wallet);
+export async function fetchWalletPositions(wallet) {
+  const cachedResponse = peekCachedWalletPositions(wallet);
 
   if (cachedResponse) {
     positionsProviderLogger.info(
@@ -280,6 +303,7 @@ export async function fetchEthereumMainnetPositions(wallet) {
   );
 
   const emptyResponse = buildEmptyResponse(wallet);
+  const zerionChainId = getZerionChainId(wallet.chainId);
 
   if (!env.ZERION_API_KEY) {
     positionsProviderLogger.warn(
@@ -288,6 +312,12 @@ export async function fetchEthereumMainnetPositions(wallet) {
     );
 
     return emptyResponse;
+  }
+
+  if (!zerionChainId) {
+    const error = new Error(`Zerion positions are not configured for chain ${wallet.chainId}`);
+    error.code = 'UNSUPPORTED_ZERION_CHAIN';
+    throw error;
   }
 
   if (isZerionCooldownActive()) {
@@ -327,12 +357,13 @@ export async function fetchEthereumMainnetPositions(wallet) {
           {
             walletId: wallet.id,
             walletAddress: wallet.address,
-            chainId: wallet.chainId
+            chainId: wallet.chainId,
+            zerionChainId
           },
           'Zerion positions request started'
         );
 
-        const zerionResponse = await fetchAllWalletPositions(wallet.address);
+        const zerionResponse = await fetchAllWalletPositions(wallet.address, zerionChainId);
         const includedMap = buildIncludedMap(zerionResponse.included);
         const positions = (Array.isArray(zerionResponse.data) ? zerionResponse.data : [])
           .map((position) => mapZerionPosition(position, includedMap))
@@ -348,6 +379,22 @@ export async function fetchEthereumMainnetPositions(wallet) {
 
         return response;
       } catch (error) {
+        if (isUnsupportedZerionChainError(error)) {
+          positionsProviderLogger.warn(
+            {
+              walletId: wallet.id,
+              walletAddress: wallet.address,
+              chainId: wallet.chainId,
+              zerionChainId,
+              status: error?.status ?? null
+            },
+            'Zerion positions provider reported unsupported chain'
+          );
+
+          error.code = 'UNSUPPORTED_ZERION_CHAIN';
+          throw error;
+        }
+
         if (error?.status === 429) {
           startZerionCooldown({
             walletId: wallet.id,
@@ -376,4 +423,12 @@ export async function fetchEthereumMainnetPositions(wallet) {
 
   inFlightPositionsPromises.set(cacheKey, positionsPromise);
   return positionsPromise;
+}
+
+export async function fetchEthereumMainnetPositions(wallet) {
+  return fetchWalletPositions(wallet);
+}
+
+export function peekCachedEthereumMainnetPositions(wallet) {
+  return peekCachedWalletPositions(wallet);
 }

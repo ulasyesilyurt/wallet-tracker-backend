@@ -84,12 +84,43 @@ function delay(milliseconds) {
   });
 }
 
+function getSortablePositionValueUsd(position) {
+  return typeof position?.valueUsd === 'number' && Number.isFinite(position.valueUsd)
+    ? position.valueUsd
+    : null;
+}
+
+function sortPositionsByValueUsdDescending(positions) {
+  return [...positions].sort((left, right) => {
+    const leftUsd = getSortablePositionValueUsd(left);
+    const rightUsd = getSortablePositionValueUsd(right);
+
+    if (leftUsd != null && rightUsd != null) {
+      return rightUsd - leftUsd;
+    }
+
+    if (leftUsd != null) {
+      return -1;
+    }
+
+    if (rightUsd != null) {
+      return 1;
+    }
+
+    const leftLabel = `${left?.protocolName ?? ''}:${left?.assetSymbol ?? ''}:${left?.assetName ?? ''}`;
+    const rightLabel = `${right?.protocolName ?? ''}:${right?.assetSymbol ?? ''}:${right?.assetName ?? ''}`;
+    return leftLabel.localeCompare(rightLabel);
+  });
+}
+
 function aggregatePositionsResponse({ wallet, enabledChains, chainResponses, partialReasons }) {
   return {
     walletId: wallet.id,
     chainId: wallet.chainId,
     enabledChains,
-    positions: chainResponses.flatMap((response) => response.positions ?? []),
+    positions: sortPositionsByValueUsdDescending(
+      chainResponses.flatMap((response) => response.positions ?? [])
+    ),
     isPartial: partialReasons.length > 0,
     partialReasons: [...new Set(partialReasons)]
   };

@@ -6,8 +6,10 @@ const positionsProviderLogger = logger.child({ module: 'positions-provider' });
 const ZERION_API_BASE_URL = 'https://api.zerion.io/v1';
 const POSITIONS_CACHE_TTL_MS = 60 * 1000;
 const DEGRADED_POSITIONS_CACHE_TTL_MS = 5 * 1000;
+const POSITIONS_LAST_KNOWN_GOOD_TTL_MS = 15 * 60 * 1000;
 const ZERION_RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
 const positionsCache = new Map();
+const positionsLastKnownGoodCache = new Map();
 const inFlightPositionsPromises = new Map();
 let zerionCooldownUntil = 0;
 
@@ -44,6 +46,10 @@ function buildPositionsCacheKey(wallet) {
   return `${wallet.chainId}:${wallet.address.toLowerCase()}`;
 }
 
+function getLastKnownGoodCacheKey(wallet) {
+  return buildPositionsCacheKey(wallet);
+}
+
 export function peekCachedWalletPositionsForChain(wallet, chainId = wallet.chainId) {
   const chainWallet = {
     ...wallet,
@@ -64,6 +70,26 @@ export function peekCachedWalletPositionsForChain(wallet, chainId = wallet.chain
   return cachedEntry.value;
 }
 
+function peekLastKnownGoodPositionsForChain(wallet, chainId = wallet.chainId) {
+  const chainWallet = {
+    ...wallet,
+    chainId
+  };
+  const cacheKey = getLastKnownGoodCacheKey(chainWallet);
+  const cachedEntry = positionsLastKnownGoodCache.get(cacheKey);
+
+  if (!cachedEntry) {
+    return null;
+  }
+
+  if (cachedEntry.expiresAt <= Date.now()) {
+    positionsLastKnownGoodCache.delete(cacheKey);
+    return null;
+  }
+
+  return cachedEntry.value;
+}
+
 export function peekCachedWalletPositions(wallet) {
   return peekCachedWalletPositionsForChain(wallet, wallet.chainId);
 }
@@ -71,7 +97,8 @@ export function peekCachedWalletPositions(wallet) {
 function setCachedPositionsResponse(wallet, value, { isDegraded = false } = {}) {
   positionsCache.set(buildPositionsCacheKey(wallet), {
     value,
-    expiresAt: Date.now() + (isDegraded ? DEGRADED_POSITIONS_CACHE_TTL_MS : POSITIONS_CACHE_TTL_MS)
+    expiresAt: Date.now() + (isDegraded ? DEGRADED_POSITIONS_CACHE_TTL_MS : POSITIONS_CACHE_TTL_MS),
+    isDegraded
   });
 
   positionsProviderLogger.info(
@@ -83,6 +110,24 @@ function setCachedPositionsResponse(wallet, value, { isDegraded = false } = {}) 
       isDegraded
     },
     isDegraded ? 'Cached degraded positions response' : 'Cached positions response'
+  );
+}
+
+function setLastKnownGoodPositionsResponse(wallet, value) {
+  positionsLastKnownGoodCache.set(getLastKnownGoodCacheKey(wallet), {
+    value,
+    expiresAt: Date.now() + POSITIONS_LAST_KNOWN_GOOD_TTL_MS
+  });
+
+  positionsProviderLogger.info(
+    {
+      walletId: wallet.id,
+      walletAddress: wallet.address,
+      chainId: wallet.chainId,
+      positionsCount: Array.isArray(value?.positions) ? value.positions.length : 0,
+      ttlMs: POSITIONS_LAST_KNOWN_GOOD_TTL_MS
+    },
+    'Stored last known good positions response'
   );
 }
 
@@ -317,13 +362,45 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
   );
 
   const emptyResponse = buildEmptyResponse(chainWallet);
+  const normalCacheKey = buildPositionsCacheKey(chainWallet);
+  const staleCacheKey = getLastKnownGoodCacheKey(chainWallet);
+  const freshCacheEntry = peekCachedWalletPositionsForChain(chainWallet, chainId);
+  const staleSuccessfulResponse = peekLastKnownGoodPositionsForChain(chainWallet, chainId);
   const zerionChainId = getZerionChainId(chainWallet.chainId);
+
+  positionsProviderLogger.info(
+    {
+      walletId: chainWallet.id,
+      chainId: chainWallet.chainId,
+      normalCacheKey,
+      staleSuccessCacheKey: staleCacheKey,
+      hasFreshCache: Boolean(freshCacheEntry),
+      hasStaleSuccessCache: Boolean(staleSuccessfulResponse),
+      positionsCountFromStale: Array.isArray(staleSuccessfulResponse?.positions) ? staleSuccessfulResponse.positions.length : 0,
+      degradedReason: null
+    },
+    'Positions cache diagnostics before provider fetch'
+  );
 
   if (!env.ZERION_API_KEY) {
     positionsProviderLogger.warn(
       { walletId: chainWallet.id, chainId: chainWallet.chainId },
       'ZERION_API_KEY is not configured; returning empty positions response'
     );
+
+    if (staleSuccessfulResponse) {
+      positionsProviderLogger.warn(
+        {
+          walletId: chainWallet.id,
+          walletAddress: chainWallet.address,
+          chainId: chainWallet.chainId,
+          positionsCount: staleSuccessfulResponse.positions.length,
+          degradedReason: `ZERION_API_KEY_MISSING:${chainWallet.chainId}`
+        },
+        'Using stale successful positions cache because Zerion API key is unavailable'
+      );
+      return staleSuccessfulResponse;
+    }
 
     return buildEmptyResponse(chainWallet, {
       isPartial: true,
@@ -347,6 +424,20 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
       },
       'Zerion 429 cooldown active'
     );
+
+    if (staleSuccessfulResponse) {
+      positionsProviderLogger.warn(
+        {
+          walletId: chainWallet.id,
+          walletAddress: chainWallet.address,
+          chainId: chainWallet.chainId,
+          positionsCount: staleSuccessfulResponse.positions.length,
+          degradedReason: `ZERION_COOLDOWN_ACTIVE:${chainWallet.chainId}`
+        },
+        'Using stale successful positions cache during Zerion cooldown'
+      );
+      return staleSuccessfulResponse;
+    }
 
     const degradedResponse = buildEmptyResponse(chainWallet, {
       isPartial: true,
@@ -400,6 +491,7 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
         };
 
         setCachedPositionsResponse(chainWallet, response);
+        setLastKnownGoodPositionsResponse(chainWallet, response);
 
         return response;
       } catch (error) {
@@ -425,6 +517,20 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
             walletAddress: chainWallet.address,
             chainId: chainWallet.chainId
           });
+          if (staleSuccessfulResponse) {
+            positionsProviderLogger.warn(
+              {
+                walletId: chainWallet.id,
+                walletAddress: chainWallet.address,
+                chainId: chainWallet.chainId,
+                positionsCount: staleSuccessfulResponse.positions.length,
+                degradedReason: `ZERION_RATE_LIMITED:${chainWallet.chainId}`
+              },
+              'Using stale successful positions cache after Zerion rate limit'
+            );
+            return staleSuccessfulResponse;
+          }
+
           const degradedResponse = buildEmptyResponse(chainWallet, {
             isPartial: true,
             partialReasons: [`ZERION_RATE_LIMITED:${chainWallet.chainId}`]
@@ -442,6 +548,20 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
           },
           'Zerion positions provider request failed; returning empty positions response'
         );
+
+        if (staleSuccessfulResponse) {
+          positionsProviderLogger.warn(
+            {
+              walletId: chainWallet.id,
+              walletAddress: chainWallet.address,
+              chainId: chainWallet.chainId,
+              positionsCount: staleSuccessfulResponse.positions.length,
+              degradedReason: `FETCH_FAILED:${chainWallet.chainId}`
+            },
+            'Using stale successful positions cache after provider failure'
+          );
+          return staleSuccessfulResponse;
+        }
 
         return buildEmptyResponse(chainWallet, {
           isPartial: true,

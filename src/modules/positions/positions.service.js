@@ -1,4 +1,5 @@
 import { HttpError } from '../../utils/httpError.js';
+import { logger } from '../../config/logger.js';
 import { BASE_MAINNET_CHAIN_ID, ETHEREUM_MAINNET_CHAIN_ID } from '../chains/chains.config.js';
 import { findWalletByIdOnly } from '../wallets/wallets.repository.js';
 import {
@@ -8,8 +9,10 @@ import {
 
 const POSITIONS_CACHE_TTL_MS = 60 * 1000;
 const DEGRADED_POSITIONS_CACHE_TTL_MS = 5 * 1000;
+const CHAIN_FETCH_DELAY_MS = 150;
 const positionsCache = new Map();
 const inFlightPositionsPromises = new Map();
+const positionsServiceLogger = logger.child({ module: 'positions-service' });
 
 async function findSupportedWallet(walletId) {
   const wallet = await findWalletByIdOnly(walletId);
@@ -75,6 +78,12 @@ function buildPartialReason(kind, chainId) {
   return `${kind}:${chainId}`;
 }
 
+function delay(milliseconds) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
 function aggregatePositionsResponse({ wallet, enabledChains, chainResponses, partialReasons }) {
   return {
     walletId: wallet.id,
@@ -103,35 +112,97 @@ export async function getWalletPositions(walletId) {
 
   const positionsPromise = Promise.resolve()
     .then(async () => {
-      const chainResults = await Promise.allSettled(
-        supportedChains.map((chainId) => fetchWalletPositionsForChain(wallet, chainId))
-      );
       const partialReasons = [];
       const successfulResponses = [];
+      let firstNonUnsupportedError = null;
 
-      for (let index = 0; index < chainResults.length; index += 1) {
+      positionsServiceLogger.info(
+        {
+          walletId: wallet.id,
+          enabledChains
+        },
+        'Starting sequential multi-chain positions fetch'
+      );
+
+      for (let index = 0; index < supportedChains.length; index += 1) {
         const chainId = supportedChains[index];
-        const result = chainResults[index];
+        const cachedChainResponse = peekCachedWalletPositionsForChain(wallet, chainId);
 
-        if (result.status === 'fulfilled') {
-          successfulResponses.push(result.value);
+        positionsServiceLogger.info(
+          {
+            walletId: wallet.id,
+            enabledChains,
+            chainId,
+            cacheState: cachedChainResponse ? 'hit' : 'miss'
+          },
+          cachedChainResponse ? 'Per-chain positions cache hit before fetch' : 'Per-chain positions cache miss before fetch'
+        );
 
-          if (result.value.isPartial === true && Array.isArray(result.value.partialReasons)) {
-            partialReasons.push(...result.value.partialReasons);
+        try {
+          const chainResponse = await fetchWalletPositionsForChain(wallet, chainId);
+          successfulResponses.push(chainResponse);
+
+          positionsServiceLogger.info(
+            {
+              walletId: wallet.id,
+              enabledChains,
+              chainId,
+              positionsCount: Array.isArray(chainResponse.positions) ? chainResponse.positions.length : 0
+            },
+            'Fetched positions for enabled chain'
+          );
+
+          if (chainResponse.isPartial === true && Array.isArray(chainResponse.partialReasons)) {
+            partialReasons.push(...chainResponse.partialReasons);
+            positionsServiceLogger.warn(
+              {
+                walletId: wallet.id,
+                enabledChains,
+                chainId,
+                partialReasons: chainResponse.partialReasons
+              },
+              'Per-chain positions result is partial'
+            );
           }
-          continue;
+        } catch (error) {
+          if (error?.code === 'UNSUPPORTED_ZERION_CHAIN') {
+            const reason = buildPartialReason('UNSUPPORTED_CHAIN', chainId);
+            partialReasons.push(reason);
+            positionsServiceLogger.warn(
+              {
+                walletId: wallet.id,
+                enabledChains,
+                chainId,
+                partialReason: reason
+              },
+              'Per-chain positions are unsupported'
+            );
+          } else {
+            const reason = buildPartialReason('FETCH_FAILED', chainId);
+            partialReasons.push(reason);
+            if (!firstNonUnsupportedError) {
+              firstNonUnsupportedError = error;
+            }
+            positionsServiceLogger.warn(
+              {
+                walletId: wallet.id,
+                enabledChains,
+                chainId,
+                partialReason: reason,
+                err: error
+              },
+              'Per-chain positions fetch failed'
+            );
+          }
         }
 
-        if (result.reason?.code === 'UNSUPPORTED_ZERION_CHAIN') {
-          partialReasons.push(buildPartialReason('UNSUPPORTED_CHAIN', chainId));
-          continue;
+        if (index < supportedChains.length - 1) {
+          await delay(CHAIN_FETCH_DELAY_MS);
         }
-
-        partialReasons.push(buildPartialReason('FETCH_FAILED', chainId));
       }
 
       if (successfulResponses.length === 0) {
-        if (chainResults.some((result) => result.status === 'rejected' && result.reason?.code === 'UNSUPPORTED_ZERION_CHAIN')) {
+        if (partialReasons.some((reason) => reason.startsWith('UNSUPPORTED_CHAIN:'))) {
           throw new HttpError(
             400,
             'UNSUPPORTED_POSITIONS_CHAIN',
@@ -139,8 +210,7 @@ export async function getWalletPositions(walletId) {
           );
         }
 
-        throw chainResults.find((result) => result.status === 'rejected')?.reason
-          ?? new Error('No enabled chain positions could be fetched.');
+        throw firstNonUnsupportedError ?? new Error('No enabled chain positions could be fetched.');
       }
 
       const aggregatedResponse = aggregatePositionsResponse({

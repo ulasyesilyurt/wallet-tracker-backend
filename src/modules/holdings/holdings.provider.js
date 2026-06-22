@@ -1425,12 +1425,16 @@ function evaluateSuspicion(holding, pricingReason) {
   };
 }
 
-export async function fetchWalletHoldings(wallet) {
-  const alchemyProvider = getAlchemyProvider(wallet.chainId);
-  const alchemyApiKey = extractAlchemyApiKey(wallet.chainId);
+export async function fetchWalletHoldingsForChain(wallet, chainId = wallet.chainId) {
+  const chainWallet = {
+    ...wallet,
+    chainId
+  };
+  const alchemyProvider = getAlchemyProvider(chainWallet.chainId);
+  const alchemyApiKey = extractAlchemyApiKey(chainWallet.chainId);
   const [nativeBalance, tokenBalanceResult] = await Promise.all([
-    alchemyProvider.getBalance(wallet.address),
-    fetchAllErc20Balances(alchemyProvider, wallet.chainId, wallet.address)
+    alchemyProvider.getBalance(chainWallet.address),
+    fetchAllErc20Balances(alchemyProvider, chainWallet.chainId, chainWallet.address)
   ]);
   const tokenBalances = tokenBalanceResult.tokenBalances;
 
@@ -1439,7 +1443,7 @@ export async function fetchWalletHoldings(wallet) {
       tokenBalances.map(async (tokenBalance) => {
         const metadata = await fetchTokenMetadataWithCache(
           alchemyProvider,
-          wallet.chainId,
+          chainWallet.chainId,
           tokenBalance.contractAddress
         );
 
@@ -1460,7 +1464,7 @@ export async function fetchWalletHoldings(wallet) {
       return left.tokenAddress.localeCompare(right.tokenAddress);
     });
 
-  const nativeHolding = buildNativeHolding(wallet.chainId, nativeBalance);
+  const nativeHolding = buildNativeHolding(chainWallet.chainId, nativeBalance);
   const baseHoldings = [nativeHolding, ...erc20Holdings].filter(Boolean);
   const erc20PricingCandidates = erc20Holdings.filter((holding) => !shouldSkipPrePricingForHolding(holding));
   const prefilteredPricingSkippedCount = erc20Holdings.length - erc20PricingCandidates.length;
@@ -1468,6 +1472,7 @@ export async function fetchWalletHoldings(wallet) {
   logHoldingsInfo(
     {
       walletId: wallet.id,
+      chainId: chainWallet.chainId,
       totalErc20Holdings: erc20Holdings.length,
       pricingCandidateCount: erc20PricingCandidates.length,
       prefilteredPricingSkippedCount
@@ -1476,7 +1481,7 @@ export async function fetchWalletHoldings(wallet) {
   );
 
   const [nativeEthUsdPrice, erc20AddressPricing] = await Promise.all([
-    fetchNativeEthUsdPrice(alchemyApiKey, wallet.chainId).catch((error) => {
+    fetchNativeEthUsdPrice(alchemyApiKey, chainWallet.chainId).catch((error) => {
       const pricingReason = error?.rateLimited ? 'rate_limited' : 'pricing_unavailable';
       holdingsProviderLogger.warn(
         {
@@ -1487,7 +1492,7 @@ export async function fetchWalletHoldings(wallet) {
       );
       return null;
     }),
-    fetchErc20PricesByAddress(alchemyApiKey, wallet.chainId, erc20PricingCandidates).catch((error) => {
+    fetchErc20PricesByAddress(alchemyApiKey, chainWallet.chainId, erc20PricingCandidates).catch((error) => {
       const pricingReason = error?.rateLimited ? 'rate_limited' : 'pricing_unavailable';
       holdingsProviderLogger.warn(
         {
@@ -1511,7 +1516,7 @@ export async function fetchWalletHoldings(wallet) {
 
     return (erc20AddressPricing.priceMap.get(normalizedAddress) ?? null) == null;
   });
-  const erc20SymbolPricing = await fetchErc20PricesBySymbol(alchemyApiKey, wallet.chainId, unpricedErc20Holdings).catch((error) => {
+  const erc20SymbolPricing = await fetchErc20PricesBySymbol(alchemyApiKey, chainWallet.chainId, unpricedErc20Holdings).catch((error) => {
     const pricingReason = error?.rateLimited ? 'rate_limited' : 'pricing_unavailable';
     holdingsProviderLogger.warn(
       {
@@ -1540,7 +1545,10 @@ export async function fetchWalletHoldings(wallet) {
         'Computed holding USD balance'
       );
 
-      return pricedHolding;
+      return {
+        ...pricedHolding,
+        chainId: chainWallet.chainId
+      };
     }
 
     const normalizedTokenAddress = holding.tokenAddress.toLowerCase();
@@ -1561,6 +1569,7 @@ export async function fetchWalletHoldings(wallet) {
     const suspicion = evaluateSuspicion(pricedHolding, pricingReason);
     const finalizedHolding = {
       ...pricedHolding,
+      chainId: chainWallet.chainId,
       isSuspicious: suspicion.isSuspicious,
       suspicionReasons: suspicion.suspicionReasons
     };
@@ -1625,8 +1634,8 @@ export async function fetchWalletHoldings(wallet) {
   );
 
   const result = {
-    walletId: wallet.id,
-    chainId: wallet.chainId,
+    walletId: chainWallet.id,
+    chainId: chainWallet.chainId,
     totalBalanceUsd: !hasAnyHoldings
       ? 0
       : hasPricedNonSuspiciousHoldings
@@ -1640,7 +1649,7 @@ export async function fetchWalletHoldings(wallet) {
   holdingsProviderLogger.info(
     {
       walletId: wallet.id,
-      chainId: wallet.chainId,
+      chainId: chainWallet.chainId,
       holdingsCount: holdings.length,
       pricedHoldingsCount: holdings.filter(
         (holding) => typeof holding.balanceUsd === 'number' && Number.isFinite(holding.balanceUsd)
@@ -1654,6 +1663,10 @@ export async function fetchWalletHoldings(wallet) {
   );
 
   return result;
+}
+
+export async function fetchWalletHoldings(wallet) {
+  return fetchWalletHoldingsForChain(wallet, wallet.chainId);
 }
 
 export async function fetchEthereumMainnetHoldings(wallet) {

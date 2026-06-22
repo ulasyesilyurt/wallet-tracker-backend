@@ -9,7 +9,6 @@ const portfolioSummaryCache = new Map();
 const inFlightPortfolioSummaryPromises = new Map();
 const POSITIONS_NOT_FETCHED_LIST_MODE_REASON = 'POSITIONS_NOT_FETCHED_LIST_MODE';
 const POSITIONS_UNSUPPORTED_CHAIN_REASON = 'POSITIONS_UNSUPPORTED_CHAIN';
-const POSITIONS_MULTI_CHAIN_NOT_AGGREGATED_REASON = 'POSITIONS_MULTI_CHAIN_NOT_AGGREGATED';
 
 function buildValuationReason({ hasAnyHoldings, hasAnyPositions, holdingsTotalUsd, positionsTotalUsd }) {
   const reasons = [];
@@ -148,11 +147,6 @@ export async function getWalletPortfolioSummary(walletId, { includePositions = t
       : includePositions
         ? positions?.positions ?? []
         : [];
-    const enabledChains = Array.isArray(holdings.enabledChains) && holdings.enabledChains.length > 0
-      ? holdings.enabledChains
-      : [holdings.chainId];
-    const hasMultipleEnabledChains = enabledChains.length > 1;
-
     const holdingsTotalUsd =
       typeof holdings.totalBalanceUsd === 'number' && Number.isFinite(holdings.totalBalanceUsd)
         ? holdings.totalBalanceUsd
@@ -176,12 +170,11 @@ export async function getWalletPortfolioSummary(walletId, { includePositions = t
         ? !hasAnyPositions || positionsTotalUsd != null
         : false;
     const skippedFreshPositions = !includePositions && !usedCachedPositions;
-    const positionsMultiChainNotAggregated = includePositions && hasMultipleEnabledChains;
     const isPartial =
       holdings.isPartial === true ||
       !holdingsValuationAvailable ||
       positionsUnsupported ||
-      positionsMultiChainNotAggregated ||
+      positions?.isPartial === true ||
       (includePositions && !positionsValuationAvailable) ||
       skippedFreshPositions;
     const reason = buildValuationReason({
@@ -194,8 +187,10 @@ export async function getWalletPortfolioSummary(walletId, { includePositions = t
 
     if (positionsUnsupported) {
       normalizedReason = POSITIONS_UNSUPPORTED_CHAIN_REASON;
-    } else if (positionsMultiChainNotAggregated) {
-      normalizedReason = POSITIONS_MULTI_CHAIN_NOT_AGGREGATED_REASON;
+    } else if (positions?.isPartial) {
+      normalizedReason = Array.isArray(positions.partialReasons) && positions.partialReasons.length > 0
+        ? positions.partialReasons.join(',')
+        : reason;
     } else if (!includePositions && usedCachedPositions) {
       normalizedReason = reason;
     } else if (skippedFreshPositions) {
@@ -234,7 +229,9 @@ export async function getWalletPortfolioSummary(walletId, { includePositions = t
       positionsValuationAvailable,
       isPartial,
       reason: normalizedReason,
-      enabledChains
+      enabledChains: Array.isArray(holdings.enabledChains) && holdings.enabledChains.length > 0
+        ? holdings.enabledChains
+        : [holdings.chainId]
     };
 
     setCachedPortfolioSummary(walletId, summary, { includePositions });

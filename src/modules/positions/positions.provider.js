@@ -30,11 +30,13 @@ function startZerionCooldown(context = {}) {
   );
 }
 
-function buildEmptyResponse(wallet) {
+function buildEmptyResponse(wallet, options = {}) {
   return {
     walletId: wallet.id,
     chainId: wallet.chainId,
-    positions: []
+    positions: [],
+    isPartial: options.isPartial === true,
+    partialReasons: Array.isArray(options.partialReasons) ? options.partialReasons : []
   };
 }
 
@@ -42,8 +44,12 @@ function buildPositionsCacheKey(wallet) {
   return `${wallet.chainId}:${wallet.address.toLowerCase()}`;
 }
 
-export function peekCachedWalletPositions(wallet) {
-  const cacheKey = buildPositionsCacheKey(wallet);
+export function peekCachedWalletPositionsForChain(wallet, chainId = wallet.chainId) {
+  const chainWallet = {
+    ...wallet,
+    chainId
+  };
+  const cacheKey = buildPositionsCacheKey(chainWallet);
   const cachedEntry = positionsCache.get(cacheKey);
 
   if (!cachedEntry) {
@@ -56,6 +62,10 @@ export function peekCachedWalletPositions(wallet) {
   }
 
   return cachedEntry.value;
+}
+
+export function peekCachedWalletPositions(wallet) {
+  return peekCachedWalletPositionsForChain(wallet, wallet.chainId);
 }
 
 function setCachedPositionsResponse(wallet, value, { isDegraded = false } = {}) {
@@ -270,23 +280,27 @@ async function fetchAllWalletPositions(walletAddress, zerionChainId) {
   };
 }
 
-export async function fetchWalletPositions(wallet) {
-  const cachedResponse = peekCachedWalletPositions(wallet);
+export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chainId) {
+  const chainWallet = {
+    ...wallet,
+    chainId
+  };
+  const cachedResponse = peekCachedWalletPositionsForChain(chainWallet, chainId);
 
   if (cachedResponse) {
     positionsProviderLogger.info(
       {
-        walletId: wallet.id,
-        walletAddress: wallet.address,
-        chainId: wallet.chainId
+        walletId: chainWallet.id,
+        walletAddress: chainWallet.address,
+        chainId: chainWallet.chainId
       },
       'Positions cache hit'
     );
     positionsProviderLogger.info(
       {
-        walletId: wallet.id,
-        walletAddress: wallet.address,
-        chainId: wallet.chainId
+        walletId: chainWallet.id,
+        walletAddress: chainWallet.address,
+        chainId: chainWallet.chainId
       },
       'Zerion request skipped because cache exists'
     );
@@ -295,27 +309,30 @@ export async function fetchWalletPositions(wallet) {
 
   positionsProviderLogger.info(
     {
-      walletId: wallet.id,
-      walletAddress: wallet.address,
-      chainId: wallet.chainId
+      walletId: chainWallet.id,
+      walletAddress: chainWallet.address,
+      chainId: chainWallet.chainId
     },
     'Positions cache miss'
   );
 
-  const emptyResponse = buildEmptyResponse(wallet);
-  const zerionChainId = getZerionChainId(wallet.chainId);
+  const emptyResponse = buildEmptyResponse(chainWallet);
+  const zerionChainId = getZerionChainId(chainWallet.chainId);
 
   if (!env.ZERION_API_KEY) {
     positionsProviderLogger.warn(
-      { walletId: wallet.id },
+      { walletId: chainWallet.id, chainId: chainWallet.chainId },
       'ZERION_API_KEY is not configured; returning empty positions response'
     );
 
-    return emptyResponse;
+    return buildEmptyResponse(chainWallet, {
+      isPartial: true,
+      partialReasons: [`ZERION_API_KEY_MISSING:${chainWallet.chainId}`]
+    });
   }
 
   if (!zerionChainId) {
-    const error = new Error(`Zerion positions are not configured for chain ${wallet.chainId}`);
+    const error = new Error(`Zerion positions are not configured for chain ${chainWallet.chainId}`);
     error.code = 'UNSUPPORTED_ZERION_CHAIN';
     throw error;
   }
@@ -323,27 +340,31 @@ export async function fetchWalletPositions(wallet) {
   if (isZerionCooldownActive()) {
     positionsProviderLogger.warn(
       {
-        walletId: wallet.id,
-        walletAddress: wallet.address,
-        chainId: wallet.chainId,
+        walletId: chainWallet.id,
+        walletAddress: chainWallet.address,
+        chainId: chainWallet.chainId,
         cooldownRemainingMs: getZerionCooldownRemainingMs()
       },
       'Zerion 429 cooldown active'
     );
 
-    setCachedPositionsResponse(wallet, emptyResponse, { isDegraded: true });
-    return emptyResponse;
+    const degradedResponse = buildEmptyResponse(chainWallet, {
+      isPartial: true,
+      partialReasons: [`ZERION_COOLDOWN_ACTIVE:${chainWallet.chainId}`]
+    });
+    setCachedPositionsResponse(chainWallet, degradedResponse, { isDegraded: true });
+    return degradedResponse;
   }
 
-  const cacheKey = buildPositionsCacheKey(wallet);
+  const cacheKey = buildPositionsCacheKey(chainWallet);
   const existingPromise = inFlightPositionsPromises.get(cacheKey);
 
   if (existingPromise) {
     positionsProviderLogger.info(
       {
-        walletId: wallet.id,
-        walletAddress: wallet.address,
-        chainId: wallet.chainId
+        walletId: chainWallet.id,
+        walletAddress: chainWallet.address,
+        chainId: chainWallet.chainId
       },
       'Positions in-flight request reused'
     );
@@ -355,36 +376,39 @@ export async function fetchWalletPositions(wallet) {
       try {
         positionsProviderLogger.info(
           {
-            walletId: wallet.id,
-            walletAddress: wallet.address,
-            chainId: wallet.chainId,
+            walletId: chainWallet.id,
+            walletAddress: chainWallet.address,
+            chainId: chainWallet.chainId,
             zerionChainId
           },
           'Zerion positions request started'
         );
 
-        const zerionResponse = await fetchAllWalletPositions(wallet.address, zerionChainId);
+        const zerionResponse = await fetchAllWalletPositions(chainWallet.address, zerionChainId);
         const includedMap = buildIncludedMap(zerionResponse.included);
         const positions = (Array.isArray(zerionResponse.data) ? zerionResponse.data : [])
-          .map((position) => mapZerionPosition(position, includedMap))
+          .map((position) => ({
+            ...mapZerionPosition(position, includedMap),
+            chainId: chainWallet.chainId
+          }))
           .filter((position) => position.valueUsd == null || position.valueUsd > 0);
 
         const response = {
-          walletId: wallet.id,
-          chainId: wallet.chainId,
+          walletId: chainWallet.id,
+          chainId: chainWallet.chainId,
           positions
         };
 
-        setCachedPositionsResponse(wallet, response);
+        setCachedPositionsResponse(chainWallet, response);
 
         return response;
       } catch (error) {
         if (isUnsupportedZerionChainError(error)) {
           positionsProviderLogger.warn(
             {
-              walletId: wallet.id,
-              walletAddress: wallet.address,
-              chainId: wallet.chainId,
+              walletId: chainWallet.id,
+              walletAddress: chainWallet.address,
+              chainId: chainWallet.chainId,
               zerionChainId,
               status: error?.status ?? null
             },
@@ -398,23 +422,31 @@ export async function fetchWalletPositions(wallet) {
         if (error?.status === 429) {
           startZerionCooldown({
             walletId: wallet.id,
-            walletAddress: wallet.address,
-            chainId: wallet.chainId
+            walletAddress: chainWallet.address,
+            chainId: chainWallet.chainId
           });
-          setCachedPositionsResponse(wallet, emptyResponse, { isDegraded: true });
+          const degradedResponse = buildEmptyResponse(chainWallet, {
+            isPartial: true,
+            partialReasons: [`ZERION_RATE_LIMITED:${chainWallet.chainId}`]
+          });
+          setCachedPositionsResponse(chainWallet, degradedResponse, { isDegraded: true });
+          return degradedResponse;
         }
 
         positionsProviderLogger.error(
           {
             err: error,
-            walletId: wallet.id,
-            walletAddress: wallet.address,
-            chainId: wallet.chainId
+            walletId: chainWallet.id,
+            walletAddress: chainWallet.address,
+            chainId: chainWallet.chainId
           },
           'Zerion positions provider request failed; returning empty positions response'
         );
 
-        return emptyResponse;
+        return buildEmptyResponse(chainWallet, {
+          isPartial: true,
+          partialReasons: [`FETCH_FAILED:${chainWallet.chainId}`]
+        });
       }
     })
     .finally(() => {
@@ -423,6 +455,10 @@ export async function fetchWalletPositions(wallet) {
 
   inFlightPositionsPromises.set(cacheKey, positionsPromise);
   return positionsPromise;
+}
+
+export async function fetchWalletPositions(wallet) {
+  return fetchWalletPositionsForChain(wallet, wallet.chainId);
 }
 
 export async function fetchEthereumMainnetPositions(wallet) {

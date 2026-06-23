@@ -6,6 +6,8 @@ import {
   ETHEREUM_MAINNET_CHAIN_ID,
   getChainConfigById
 } from '../chains/chains.config.js';
+import { listProtectedTokenDefinitions } from '../events/protectedTokens.registry.js';
+import { buildAsciiSkeleton, normalizeAddress } from '../events/tokenIdentity.utils.js';
 
 const providersByChainId = new Map();
 const holdingsProviderLogger = logger.child({ module: 'holdings-provider' });
@@ -36,6 +38,20 @@ let lastTokenBalanceCooldownLogAt = 0;
 const inFlightTokenBalancePromises = new Map();
 let activeTokenMetadataRequests = 0;
 const queuedTokenMetadataResolvers = [];
+const PROTECTED_TOKEN_IDENTITY_RULES = listProtectedTokenDefinitions().map((definition) => ({
+  assetId: definition.assetId,
+  skeletons: new Set(
+    definition.labels
+      .map((label) => buildAsciiSkeleton(label))
+      .filter(Boolean)
+  ),
+  canonicalContractsByChain: new Map(
+    Object.entries(definition.canonicalContractsByChain).map(([chainId, contractAddresses]) => [
+      chainId,
+      new Set(contractAddresses.map((contractAddress) => contractAddress.toLowerCase()))
+    ])
+  )
+}));
 
 function verboseHoldingsLoggingEnabled() {
   return process.env.SUPPRESS_HOLDINGS_PROVIDER_LOGS !== 'true';
@@ -1375,7 +1391,39 @@ function hasWeakMetadata(holding) {
   };
 }
 
-function evaluateSuspicion(holding, pricingReason) {
+function detectProtectedAssetImpersonation(holding, chainId) {
+  const normalizedTokenAddress = normalizeAddress(holding.tokenAddress);
+
+  if (!normalizedTokenAddress) {
+    return null;
+  }
+
+  const symbolSkeleton = buildAsciiSkeleton(holding.symbol);
+  const nameSkeleton = buildAsciiSkeleton(holding.name);
+
+  for (const rule of PROTECTED_TOKEN_IDENTITY_RULES) {
+    const symbolMatches = symbolSkeleton ? rule.skeletons.has(symbolSkeleton) : false;
+    const nameMatches = nameSkeleton ? rule.skeletons.has(nameSkeleton) : false;
+
+    if (!symbolMatches && !nameMatches) {
+      continue;
+    }
+
+    const canonicalContracts = rule.canonicalContractsByChain.get(chainId) ?? new Set();
+
+    if (canonicalContracts.has(normalizedTokenAddress)) {
+      return null;
+    }
+
+    if (rule.assetId === 'ETH' || canonicalContracts.size > 0) {
+      return rule.assetId;
+    }
+  }
+
+  return null;
+}
+
+function evaluateSuspicion(holding, pricingReason, chainId) {
   const reasons = [];
   const numericBalance = Number(holding.balance);
   const numericValueUsd =
@@ -1404,6 +1452,12 @@ function evaluateSuspicion(holding, pricingReason) {
 
   if (pricingReason === 'priced_by_symbol_fallback' && numericValueUsd != null && numericValueUsd >= 50) {
     reasons.push('symbol_fallback_price_without_address_price');
+  }
+
+  const impersonatedProtectedAsset = detectProtectedAssetImpersonation(holding, chainId);
+
+  if (impersonatedProtectedAsset) {
+    reasons.push(`impersonates_protected_asset:${impersonatedProtectedAsset}`);
   }
 
   if (missingIdentity && missingLogo) {
@@ -1566,7 +1620,7 @@ export async function fetchWalletHoldingsForChain(wallet, chainId = wallet.chain
             ?? (normalizedSymbol ? erc20SymbolPricing.reasonMap.get(normalizedSymbol) : null)
             ?? (shouldSkipPrePricingForHolding(holding) ? 'prefiltered_suspicious_candidate' : null)
             ?? (!normalizedSymbol ? 'missing_symbol_for_fallback' : 'unknown_pricing_gap');
-    const suspicion = evaluateSuspicion(pricedHolding, pricingReason);
+    const suspicion = evaluateSuspicion(pricedHolding, pricingReason, chainWallet.chainId);
     const finalizedHolding = {
       ...pricedHolding,
       chainId: chainWallet.chainId,

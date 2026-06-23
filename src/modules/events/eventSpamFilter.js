@@ -3,7 +3,7 @@ import {
   ETHEREUM_MAINNET_CHAIN_ID
 } from '../chains/chains.config.js';
 
-const NATIVE_ETH_IMPERSONATION_TARGETS = new Set(['ETH', 'ETHEREUM']);
+const ETH_IMPERSONATION_TARGETS = new Set(['ETH', 'ETHEREUM', 'WETH', 'WRAPPEDETHER']);
 const COMBINING_OR_INVISIBLE_CHARACTERS = /[\p{M}\p{Cf}\p{Cc}\p{Cs}]/gu;
 const ASCII_ALPHANUMERIC = /^[A-Z0-9]$/;
 
@@ -99,8 +99,8 @@ export function detectNativeEthImpersonation({
 
   const normalizedSymbol = buildAsciiSkeleton(assetSymbol);
   const normalizedName = buildAsciiSkeleton(assetName);
-  const symbolMatches = normalizedSymbol && NATIVE_ETH_IMPERSONATION_TARGETS.has(normalizedSymbol);
-  const nameMatches = normalizedName && NATIVE_ETH_IMPERSONATION_TARGETS.has(normalizedName);
+  const symbolMatches = normalizedSymbol && ETH_IMPERSONATION_TARGETS.has(normalizedSymbol);
+  const nameMatches = normalizedName && ETH_IMPERSONATION_TARGETS.has(normalizedName);
 
   return {
     shouldReject: Boolean(symbolMatches || nameMatches),

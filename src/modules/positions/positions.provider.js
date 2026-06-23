@@ -5,7 +5,7 @@ import { getChainConfigById } from '../chains/chains.config.js';
 const positionsProviderLogger = logger.child({ module: 'positions-provider' });
 const ZERION_API_BASE_URL = 'https://api.zerion.io/v1';
 const POSITIONS_CACHE_TTL_MS = 60 * 1000;
-const DEGRADED_POSITIONS_CACHE_TTL_MS = 5 * 1000;
+const DEGRADED_POSITIONS_CACHE_TTL_MS = 60 * 1000;
 const POSITIONS_LAST_KNOWN_GOOD_TTL_MS = 15 * 60 * 1000;
 const ZERION_RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
 const positionsCache = new Map();
@@ -129,6 +129,21 @@ function setLastKnownGoodPositionsResponse(wallet, value) {
     },
     'Stored last known good positions response'
   );
+}
+
+function buildPartialResponseFromLastKnownGood(lastKnownGoodResponse, partialReason) {
+  const existingPartialReasons = Array.isArray(lastKnownGoodResponse?.partialReasons)
+    ? lastKnownGoodResponse.partialReasons
+    : [];
+
+  return {
+    ...lastKnownGoodResponse,
+    positions: Array.isArray(lastKnownGoodResponse?.positions)
+      ? [...lastKnownGoodResponse.positions]
+      : [],
+    isPartial: true,
+    partialReasons: [...new Set([...existingPartialReasons, partialReason])]
+  };
 }
 
 function buildZerionAuthorizationHeader() {
@@ -415,6 +430,8 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
   }
 
   if (isZerionCooldownActive()) {
+    const cooldownReason = `ZERION_COOLDOWN_ACTIVE:${chainWallet.chainId}`;
+
     positionsProviderLogger.warn(
       {
         walletId: chainWallet.id,
@@ -426,22 +443,29 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
     );
 
     if (staleSuccessfulResponse) {
+      const partialStaleResponse = buildPartialResponseFromLastKnownGood(
+        staleSuccessfulResponse,
+        cooldownReason
+      );
+
       positionsProviderLogger.warn(
         {
           walletId: chainWallet.id,
           walletAddress: chainWallet.address,
           chainId: chainWallet.chainId,
           positionsCount: staleSuccessfulResponse.positions.length,
-          degradedReason: `ZERION_COOLDOWN_ACTIVE:${chainWallet.chainId}`
+          degradedReason: cooldownReason
         },
         'Using stale successful positions cache during Zerion cooldown'
       );
-      return staleSuccessfulResponse;
+
+      setCachedPositionsResponse(chainWallet, partialStaleResponse, { isDegraded: true });
+      return partialStaleResponse;
     }
 
     const degradedResponse = buildEmptyResponse(chainWallet, {
       isPartial: true,
-      partialReasons: [`ZERION_COOLDOWN_ACTIVE:${chainWallet.chainId}`]
+      partialReasons: [cooldownReason]
     });
     setCachedPositionsResponse(chainWallet, degradedResponse, { isDegraded: true });
     return degradedResponse;
@@ -512,28 +536,37 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
         }
 
         if (error?.status === 429) {
+          const rateLimitedReason = `ZERION_RATE_LIMITED:${chainWallet.chainId}`;
+
           startZerionCooldown({
             walletId: wallet.id,
             walletAddress: chainWallet.address,
             chainId: chainWallet.chainId
           });
           if (staleSuccessfulResponse) {
+            const partialStaleResponse = buildPartialResponseFromLastKnownGood(
+              staleSuccessfulResponse,
+              rateLimitedReason
+            );
+
             positionsProviderLogger.warn(
               {
                 walletId: chainWallet.id,
                 walletAddress: chainWallet.address,
                 chainId: chainWallet.chainId,
                 positionsCount: staleSuccessfulResponse.positions.length,
-                degradedReason: `ZERION_RATE_LIMITED:${chainWallet.chainId}`
+                degradedReason: rateLimitedReason
               },
               'Using stale successful positions cache after Zerion rate limit'
             );
-            return staleSuccessfulResponse;
+
+            setCachedPositionsResponse(chainWallet, partialStaleResponse, { isDegraded: true });
+            return partialStaleResponse;
           }
 
           const degradedResponse = buildEmptyResponse(chainWallet, {
             isPartial: true,
-            partialReasons: [`ZERION_RATE_LIMITED:${chainWallet.chainId}`]
+            partialReasons: [rateLimitedReason]
           });
           setCachedPositionsResponse(chainWallet, degradedResponse, { isDegraded: true });
           return degradedResponse;

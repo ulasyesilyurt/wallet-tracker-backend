@@ -6,6 +6,7 @@ import {
   getExplorerTxBaseUrl,
   resolveChainIdFromAlchemyWebhookNetwork
 } from '../chains/chains.config.js';
+import { detectNativeEthImpersonation } from '../events/eventSpamFilter.js';
 import { insertWalletEvents } from '../events/events.repository.js';
 import { findTrackedWalletsByAddresses } from '../wallets/wallets.repository.js';
 
@@ -328,6 +329,35 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
     const decimals = activity.rawContract?.decimals != null ? Number(activity.rawContract.decimals) : 18;
     const rawValue = getRawContractValue(activity);
     const amount = rawValue != null ? formatUnits(rawValue, decimals) : activity.value != null ? String(activity.value) : null;
+    const impersonationCheck = detectNativeEthImpersonation({
+      chainId,
+      eventType: 'token_transfer',
+      tokenStandard: 'erc20',
+      contractAddress: activityKind.contractAddress,
+      assetSymbol: activity.asset ?? null,
+      assetName: activity.asset ?? null
+    });
+
+    if (impersonationCheck.shouldReject) {
+      webhookLogger.info({
+        transactionHash: activity.hash,
+        blockNumber,
+        contractAddress: activityKind.contractAddress,
+        fromAddress,
+        toAddress,
+        eventType: 'token_transfer',
+        assetSymbol: activity.asset ?? null,
+        assetName: activity.asset ?? null,
+        normalizedSymbol: impersonationCheck.normalizedSymbol,
+        normalizedName: impersonationCheck.normalizedName,
+        matchedWalletIds: lifecycle.matchedWalletIds,
+        matched: lifecycle.matched,
+        outcome: 'rejected',
+        rejectionReason: impersonationCheck.rejectionReason
+      }, 'Alchemy ERC-20 transfer skipped because token impersonates native ETH');
+
+      return [];
+    }
 
     return wallets.map((wallet) =>
       buildEventBase({

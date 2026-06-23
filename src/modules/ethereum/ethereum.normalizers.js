@@ -10,6 +10,7 @@ import {
   ETHEREUM_EXPLORER_TX_BASE_URL,
   ETHEREUM_MAINNET_CHAIN_ID
 } from './ethereum.constants.js';
+import { detectNativeEthImpersonation } from '../events/eventSpamFilter.js';
 
 const erc721TransferInterface = new Interface(['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)']);
 const erc20TransferInterface = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
@@ -297,6 +298,54 @@ export async function normalizeTransferLog({
     }
 
     const rawPayload = buildBaseRawPayload(log, parsedLog, block, fromAddress, toAddress);
+    const impersonationCheck = !isNft
+      ? detectNativeEthImpersonation({
+          chainId: ETHEREUM_MAINNET_CHAIN_ID,
+          eventType: 'token_transfer',
+          tokenStandard: 'erc20',
+          contractAddress: log.address,
+          assetSymbol: contractMetadata.symbol,
+          assetName: contractMetadata.name
+        })
+      : { shouldReject: false };
+
+    if (!isNft && impersonationCheck.shouldReject) {
+      logLifecycle(logger, {
+        ...lifecycle,
+        decodedPreview: {
+          value: parsedLog.args.value.toString(),
+          layout: 'erc20',
+          assetSymbol: contractMetadata.symbol,
+          assetName: contractMetadata.name,
+          normalizedSymbol: impersonationCheck.normalizedSymbol,
+          normalizedName: impersonationCheck.normalizedName
+        },
+        matched: true,
+        outcome: 'rejected',
+        rejectionReason: impersonationCheck.rejectionReason,
+        insertQueryRan: false
+      });
+
+      if (shouldTraceLifecycle(lifecycle, traceConfig)) {
+        logger.warn({
+          ...lifecycle,
+          decodedPreview: {
+            value: parsedLog.args.value.toString(),
+            layout: 'erc20',
+            assetSymbol: contractMetadata.symbol,
+            assetName: contractMetadata.name,
+            normalizedSymbol: impersonationCheck.normalizedSymbol,
+            normalizedName: impersonationCheck.normalizedName
+          },
+          matched: true,
+          outcome: 'rejected',
+          rejectionReason: impersonationCheck.rejectionReason,
+          insertQueryRan: false
+        }, 'Targeted Ethereum trace event');
+      }
+
+      return [];
+    }
 
     const events = lifecycle.matchedWallets.map((wallet) => ({
       walletId: wallet.id,

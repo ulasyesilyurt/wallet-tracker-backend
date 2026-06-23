@@ -168,7 +168,7 @@ function buildLifecycleContext({ transactionHash, blockNumber, contractAddress, 
   };
 }
 
-function buildEventBase({ wallet, activity, chainId, blockNumber, logIndex, fromAddress, toAddress, occurredAt, eventType, assetType, assetSymbol, assetName, amount, amountWei, nftContractAddress, nftTokenId, tokenStandard, contractAddress, lifecycle }) {
+function buildEventBase({ wallet, activity, chainId, blockNumber, logIndex, fromAddress, toAddress, occurredAt, eventType, assetType, assetSymbol, assetName, amount, amountWei, tokenContractAddress, nftContractAddress, nftTokenId, tokenStandard, contractAddress, lifecycle }) {
   return {
     walletId: wallet.id,
     chainId,
@@ -178,6 +178,7 @@ function buildEventBase({ wallet, activity, chainId, blockNumber, logIndex, from
     assetSymbol,
     assetName,
     amount,
+    tokenContractAddress,
     nftContractAddress,
     nftTokenId,
     marketplace: null,
@@ -289,6 +290,7 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
           assetName: activity.asset ?? 'NFT',
           amount: item.value != null ? String(item.value) : '1',
           amountWei: null,
+          tokenContractAddress: null,
           nftContractAddress: activityKind.contractAddress,
           nftTokenId: item.tokenId,
           tokenStandard: 'erc1155',
@@ -316,6 +318,7 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
         assetName: activity.asset ?? 'NFT',
         amount: '1',
         amountWei: null,
+        tokenContractAddress: null,
         nftContractAddress: activityKind.contractAddress,
         nftTokenId: activity.erc721TokenId,
         tokenStandard: 'erc721',
@@ -375,6 +378,7 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
         assetName: activity.asset ?? null,
         amount,
         amountWei: null,
+        tokenContractAddress: activityKind.contractAddress,
         nftContractAddress: null,
         nftTokenId: null,
         tokenStandard: 'erc20',
@@ -426,6 +430,7 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
       assetName: activity.asset ?? 'ETH',
       amount: nativeAmount,
       amountWei: nativeWei,
+      tokenContractAddress: null,
       nftContractAddress: null,
       nftTokenId: null,
       tokenStandard: 'native',

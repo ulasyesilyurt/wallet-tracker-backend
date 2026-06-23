@@ -12,6 +12,7 @@ function mapWalletEvent(row) {
     assetSymbol: row.asset_symbol,
     assetName: row.asset_name,
     amount: row.amount != null ? row.amount.toString() : null,
+    tokenContractAddress: row.token_contract_address,
     nftContractAddress: row.nft_contract_address,
     nftTokenId: row.nft_token_id,
     marketplace: row.marketplace,
@@ -81,6 +82,7 @@ export async function insertWalletEvents(events, logger = null) {
           asset_symbol,
           asset_name,
           amount,
+          token_contract_address,
           nft_contract_address,
           nft_token_id,
           marketplace,
@@ -95,7 +97,7 @@ export async function insertWalletEvents(events, logger = null) {
           direction
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18, $19, $20
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21
         )
         ON CONFLICT DO NOTHING
         RETURNING id, wallet_id, transaction_hash, event_type, asset_type, occurred_at
@@ -109,6 +111,7 @@ export async function insertWalletEvents(events, logger = null) {
         event.assetSymbol,
         event.assetName,
         event.amount,
+        event.tokenContractAddress,
         event.nftContractAddress,
         event.nftTokenId,
         event.marketplace,
@@ -159,6 +162,7 @@ export async function insertWalletEvents(events, logger = null) {
         assetSymbol: event.assetSymbol,
         assetName: event.assetName,
         amount: event.amount,
+        tokenContractAddress: event.tokenContractAddress,
         nftContractAddress: event.nftContractAddress,
         nftTokenId: event.nftTokenId,
         marketplace: event.marketplace,
@@ -229,6 +233,7 @@ export async function listWalletEventsByWalletId(walletId) {
         asset_symbol,
         asset_name,
         amount,
+        token_contract_address,
         nft_contract_address,
         nft_token_id,
         marketplace,

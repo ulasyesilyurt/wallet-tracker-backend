@@ -1423,6 +1423,19 @@ function detectProtectedAssetImpersonation(holding, chainId) {
   return null;
 }
 
+function isCanonicalProtectedTokenContract(chainId, tokenAddress) {
+  const normalizedTokenAddress = normalizeAddress(tokenAddress);
+
+  if (!normalizedTokenAddress) {
+    return false;
+  }
+
+  return PROTECTED_TOKEN_IDENTITY_RULES.some((rule) => {
+    const canonicalContracts = rule.canonicalContractsByChain.get(chainId);
+    return canonicalContracts?.has(normalizedTokenAddress) ?? false;
+  });
+}
+
 function evaluateSuspicion(holding, pricingReason, chainId) {
   const reasons = [];
   const numericBalance = Number(holding.balance);
@@ -1466,9 +1479,26 @@ function evaluateSuspicion(holding, pricingReason, chainId) {
     reasons.push('low_quality_token_metadata');
   }
 
-    if (
-      numericValueUsd == null &&
-    ['no_provider_coverage_by_address', 'address_not_returned_by_provider', 'no_provider_coverage_by_symbol', 'symbol_not_returned_by_provider', 'missing_symbol_for_fallback', 'rate_limited', 'pricing_unavailable'].includes(pricingReason)
+  if (
+    numericValueUsd == null &&
+    pricingReason === 'unsupported_pricing_chain' &&
+    missingLogo &&
+    !isCanonicalProtectedTokenContract(chainId, holding.tokenAddress)
+  ) {
+    reasons.push('unpriced_unsupported_chain_missing_logo');
+  }
+
+  if (
+    numericValueUsd == null &&
+    [
+      'no_provider_coverage_by_address',
+      'address_not_returned_by_provider',
+      'no_provider_coverage_by_symbol',
+      'symbol_not_returned_by_provider',
+      'missing_symbol_for_fallback',
+      'rate_limited',
+      'pricing_unavailable'
+    ].includes(pricingReason)
   ) {
     reasons.push('unpriced_or_inconsistently_priced');
   }

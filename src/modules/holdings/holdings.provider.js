@@ -6,7 +6,10 @@ import {
   ETHEREUM_MAINNET_CHAIN_ID,
   getChainConfigById
 } from '../chains/chains.config.js';
-import { listProtectedTokenDefinitions } from '../events/protectedTokens.registry.js';
+import {
+  getCanonicalProtectedTokenContracts,
+  listProtectedTokenDefinitions
+} from '../events/protectedTokens.registry.js';
 import { buildAsciiSkeleton, normalizeAddress } from '../events/tokenIdentity.utils.js';
 
 const providersByChainId = new Map();
@@ -52,6 +55,12 @@ const PROTECTED_TOKEN_IDENTITY_RULES = listProtectedTokenDefinitions().map((defi
     ])
   )
 }));
+const CANONICAL_WETH_CONTRACTS_BY_CHAIN = new Map(
+  [ETHEREUM_MAINNET_CHAIN_ID, BASE_MAINNET_CHAIN_ID].map((chainId) => [
+    chainId,
+    getCanonicalProtectedTokenContracts(chainId, ['WETH'])
+  ])
+);
 
 function verboseHoldingsLoggingEnabled() {
   return process.env.SUPPRESS_HOLDINGS_PROVIDER_LOGS !== 'true';
@@ -1436,6 +1445,16 @@ function isCanonicalProtectedTokenContract(chainId, tokenAddress) {
   });
 }
 
+function isCanonicalWethContract(chainId, tokenAddress) {
+  const normalizedTokenAddress = normalizeAddress(tokenAddress);
+
+  if (!normalizedTokenAddress) {
+    return false;
+  }
+
+  return CANONICAL_WETH_CONTRACTS_BY_CHAIN.get(chainId)?.has(normalizedTokenAddress) ?? false;
+}
+
 function evaluateSuspicion(holding, pricingReason, chainId) {
   const reasons = [];
   const numericBalance = Number(holding.balance);
@@ -1639,13 +1658,22 @@ export async function fetchWalletHoldingsForChain(wallet, chainId = wallet.chain
     const normalizedSymbol = normalizeTokenSymbol(holding.symbol);
     const addressPrice = erc20AddressPricing.priceMap.get(normalizedTokenAddress) ?? null;
     const symbolPrice = normalizedSymbol ? erc20SymbolPricing.priceMap.get(normalizedSymbol) ?? null : null;
-    const usdPrice = addressPrice ?? symbolPrice;
+    const wethParityPrice =
+      addressPrice == null &&
+      symbolPrice == null &&
+      nativeEthUsdPrice != null &&
+      isCanonicalWethContract(chainWallet.chainId, normalizedTokenAddress)
+        ? nativeEthUsdPrice
+        : null;
+    const usdPrice = addressPrice ?? symbolPrice ?? wethParityPrice;
     const pricedHolding = attachUsdPricing(holding, usdPrice);
     const pricingReason =
       addressPrice != null
         ? 'priced_by_address'
         : symbolPrice != null
           ? 'priced_by_symbol_fallback'
+          : wethParityPrice != null
+            ? 'canonical_weth_eth_parity'
           : erc20AddressPricing.reasonMap.get(normalizedTokenAddress)
             ?? (normalizedSymbol ? erc20SymbolPricing.reasonMap.get(normalizedSymbol) : null)
             ?? (shouldSkipPrePricingForHolding(holding) ? 'prefiltered_suspicious_candidate' : null)

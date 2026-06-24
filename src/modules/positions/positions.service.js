@@ -8,7 +8,7 @@ import {
 } from './positions.provider.js';
 
 const POSITIONS_CACHE_TTL_MS = 60 * 1000;
-const DEGRADED_POSITIONS_CACHE_TTL_MS = 5 * 1000;
+const DEGRADED_POSITIONS_CACHE_TTL_MS = 30 * 1000;
 const CHAIN_FETCH_DELAY_MS = 150;
 const positionsCache = new Map();
 const inFlightPositionsPromises = new Map();

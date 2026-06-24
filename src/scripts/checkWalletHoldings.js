@@ -4,6 +4,7 @@ import { getWalletHoldings } from '../modules/holdings/holdings.service.js';
 
 const scriptLogger = logger.child({ module: 'check-wallet-holdings' });
 const SAMPLE_LIMIT = 10;
+const DETAIL_SAMPLE_LIMIT = 20;
 
 function resolveWalletId() {
   return process.argv[2] ?? process.env.WALLET_ID ?? null;
@@ -63,6 +64,19 @@ function buildTotalsByChain(holdings) {
   );
 }
 
+function buildHoldingDetails(holding) {
+  return {
+    chainId: holding.chainId ?? null,
+    symbol: holding.symbol ?? null,
+    name: holding.name ?? null,
+    tokenAddress: holding.tokenAddress ?? null,
+    balance: holding.balance ?? null,
+    balanceUsd: holding.balanceUsd ?? null,
+    hasLogo: Boolean(holding.logoUrl),
+    suspicionReasons: holding.suspicionReasons ?? []
+  };
+}
+
 async function run() {
   const walletId = resolveWalletId();
 
@@ -82,6 +96,9 @@ async function run() {
   const normalSampleSymbols = normalHoldings
     .slice(0, SAMPLE_LIMIT)
     .map(getHoldingDisplaySymbol);
+  const normalSampleDetails = normalHoldings
+    .slice(0, DETAIL_SAMPLE_LIMIT)
+    .map(buildHoldingDetails);
   const suspiciousSampleSymbols = suspiciousHoldings
     .slice(0, SAMPLE_LIMIT)
     .map(getHoldingDisplaySymbol);
@@ -113,6 +130,7 @@ async function run() {
       suspiciousCount,
       sampleSymbols: holdings.holdings.slice(0, SAMPLE_LIMIT).map(getHoldingDisplaySymbol),
       normalSampleSymbols,
+      normalSampleDetails,
       suspiciousSampleSymbols,
       suspiciousSampleDetails,
       totalsByChain

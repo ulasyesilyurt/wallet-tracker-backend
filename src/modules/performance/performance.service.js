@@ -79,10 +79,6 @@ export async function getWalletPerformance(walletId, userId) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
   }
 
-  if (wallet.chainId !== SUPPORTED_CHAIN_ID) {
-    throw new HttpError(400, 'UNSUPPORTED_PERFORMANCE_CHAIN', 'Wallet performance is currently supported only for ethereum-mainnet.');
-  }
-
   const summary = await getWalletPortfolioSummary(walletId);
   const cutoff = new Date(Date.now() - ONE_DAY_MS).toISOString();
   const snapshot = await findLatestSnapshotAtOrBefore(walletId, cutoff);
@@ -160,10 +156,6 @@ export async function getAggregatedPortfolioPerformance(userId) {
 }
 
 export async function captureWalletPortfolioSnapshot(wallet) {
-  if (wallet.chainId !== SUPPORTED_CHAIN_ID) {
-    return null;
-  }
-
   const summary = await getWalletPortfolioSummary(wallet.id);
   const capturedAt = new Date().toISOString();
 
@@ -197,11 +189,6 @@ export async function captureAllWalletPortfolioSnapshots() {
   let failedCount = 0;
 
   for (const wallet of wallets) {
-    if (wallet.chainId !== SUPPORTED_CHAIN_ID) {
-      skippedCount += 1;
-      continue;
-    }
-
     try {
       const insertedSnapshot = await captureWalletPortfolioSnapshot(wallet);
 

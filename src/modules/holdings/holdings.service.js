@@ -5,9 +5,11 @@ import { findWalletByIdOnly } from '../wallets/wallets.repository.js';
 import { fetchWalletHoldingsForChain } from './holdings.provider.js';
 
 const holdingsLogger = logger.child({ module: 'holdings-service' });
-const HOLDINGS_CACHE_TTL_MS = 15 * 1000;
-const DEGRADED_HOLDINGS_CACHE_TTL_MS = 5 * 1000;
+const HOLDINGS_CACHE_TTL_MS = 120 * 1000;
+const DEGRADED_HOLDINGS_CACHE_TTL_MS = 60 * 1000;
+const LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS = 15 * 60 * 1000;
 const holdingsCache = new Map();
+const lastKnownGoodHoldingsCache = new Map();
 const inFlightHoldingsPromises = new Map();
 
 function buildHoldingsCacheKey(wallet) {
@@ -37,6 +39,21 @@ function getCachedHoldings(cacheKey) {
   return entry.value;
 }
 
+function getLastKnownGoodHoldings(cacheKey) {
+  const entry = lastKnownGoodHoldingsCache.get(cacheKey);
+
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    lastKnownGoodHoldingsCache.delete(cacheKey);
+    return null;
+  }
+
+  return entry.value;
+}
+
 function isDegradedHoldingsResult(holdings) {
   return (
     holdings?.isPartial === true ||
@@ -44,6 +61,18 @@ function isDegradedHoldingsResult(holdings) {
     holdings?.tokenBalancesReason != null ||
     holdings?.totalBalanceUsd == null
   );
+}
+
+function isUsableLastKnownGoodHoldingsResult(holdings) {
+  const holdingsCount = Array.isArray(holdings?.holdings) ? holdings.holdings.length : 0;
+  const hasAnyHoldings = holdingsCount > 0;
+  const isExplicitlyEmptyWallet =
+    holdingsCount === 0 &&
+    holdings?.tokenBalancesAvailable === true &&
+    holdings?.totalBalanceUsd === 0 &&
+    holdings?.isPartial !== true;
+
+  return hasAnyHoldings || isExplicitlyEmptyWallet;
 }
 
 function getWalletEnabledChains(wallet) {
@@ -79,6 +108,44 @@ function setCachedHoldings(cacheKey, holdings) {
   );
 }
 
+function setLastKnownGoodHoldings(cacheKey, holdings) {
+  if (!isUsableLastKnownGoodHoldingsResult(holdings)) {
+    return;
+  }
+
+  lastKnownGoodHoldingsCache.set(cacheKey, {
+    value: holdings,
+    expiresAt: Date.now() + LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS
+  });
+
+  holdingsLogger.info(
+    {
+      cacheKey,
+      walletId: holdings.walletId,
+      chainId: holdings.chainId,
+      enabledChains: holdings.enabledChains,
+      ttlMs: LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS,
+      isPartial: holdings.isPartial === true,
+      holdingsCount: Array.isArray(holdings.holdings) ? holdings.holdings.length : 0,
+      totalBalanceUsd: holdings.totalBalanceUsd
+    },
+    'Stored last-known-good holdings result'
+  );
+}
+
+function buildStaleHoldingsFallback(holdings, partialReason) {
+  const existingPartialReasons = Array.isArray(holdings?.partialReasons) ? holdings.partialReasons : [];
+  const tokenBalanceReasons = [holdings?.tokenBalancesReason, partialReason].filter(Boolean);
+
+  return {
+    ...holdings,
+    holdings: Array.isArray(holdings?.holdings) ? [...holdings.holdings] : [],
+    isPartial: true,
+    partialReasons: [...new Set([...existingPartialReasons, partialReason])],
+    tokenBalancesReason: tokenBalanceReasons.length > 0 ? [...new Set(tokenBalanceReasons)].join(',') : null
+  };
+}
+
 export async function getWalletHoldings(walletId) {
   const wallet = await findWalletByIdOnly(walletId);
 
@@ -100,6 +167,7 @@ export async function getWalletHoldings(walletId) {
 
   const cacheKey = buildHoldingsCacheKey(wallet);
   const cachedHoldings = getCachedHoldings(cacheKey);
+  const lastKnownGoodHoldings = getLastKnownGoodHoldings(cacheKey);
 
   if (cachedHoldings) {
     holdingsLogger.info(
@@ -247,7 +315,34 @@ export async function getWalletHoldings(walletId) {
     })
     .then((holdings) => {
       setCachedHoldings(cacheKey, holdings);
+      setLastKnownGoodHoldings(cacheKey, holdings);
       return holdings;
+    })
+    .catch((error) => {
+      if (!lastKnownGoodHoldings) {
+        throw error;
+      }
+
+      const partialReason =
+        error?.code === 'TIMEOUT'
+          ? 'FETCH_FAILED_STALE_CACHE_TIMEOUT'
+          : 'FETCH_FAILED_STALE_CACHE';
+      const staleFallback = buildStaleHoldingsFallback(lastKnownGoodHoldings, partialReason);
+
+      holdingsLogger.warn(
+        {
+          cacheKey,
+          walletId: wallet.id,
+          chainId: wallet.chainId,
+          enabledChains,
+          partialReason,
+          err: error
+        },
+        'Serving stale last-known-good holdings fallback after fresh holdings fetch failed'
+      );
+
+      setCachedHoldings(cacheKey, staleFallback);
+      return staleFallback;
     })
     .finally(() => {
       inFlightHoldingsPromises.delete(cacheKey);

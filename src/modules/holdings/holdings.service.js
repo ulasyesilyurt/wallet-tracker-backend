@@ -8,9 +8,19 @@ const holdingsLogger = logger.child({ module: 'holdings-service' });
 const HOLDINGS_CACHE_TTL_MS = 120 * 1000;
 const DEGRADED_HOLDINGS_CACHE_TTL_MS = 60 * 1000;
 const LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS = 15 * 60 * 1000;
+const HOLDINGS_CHAIN_TIMEOUT_MS = 8 * 1000;
 const holdingsCache = new Map();
 const lastKnownGoodHoldingsCache = new Map();
 const inFlightHoldingsPromises = new Map();
+const chainHoldingsCache = new Map();
+const chainLastKnownGoodHoldingsCache = new Map();
+const inFlightChainHoldingsPromises = new Map();
+const CHAIN_LEVEL_TOKEN_BALANCE_PARTIAL_REASON_PREFIXES = [
+  'FETCH_TIMEOUT:',
+  'FETCH_FAILED:',
+  'STALE_HOLDINGS_CACHE:',
+  'UNSUPPORTED_CHAIN:'
+];
 
 function buildHoldingsCacheKey(wallet) {
   const enabledChains = Array.isArray(wallet.enabledChains) && wallet.enabledChains.length > 0
@@ -18,6 +28,10 @@ function buildHoldingsCacheKey(wallet) {
     : [wallet.chainId];
 
   return `${wallet.id}:${enabledChains.join('|')}`;
+}
+
+function buildChainHoldingsCacheKey(wallet, chainId) {
+  return `${wallet.id}:${wallet.address.toLowerCase()}:${chainId}`;
 }
 
 function supportsHoldingsForChain(chainId) {
@@ -39,6 +53,21 @@ function getCachedHoldings(cacheKey) {
   return entry.value;
 }
 
+function getCachedChainHoldings(cacheKey) {
+  const entry = chainHoldingsCache.get(cacheKey);
+
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    chainHoldingsCache.delete(cacheKey);
+    return null;
+  }
+
+  return entry.value;
+}
+
 function getLastKnownGoodHoldings(cacheKey) {
   const entry = lastKnownGoodHoldingsCache.get(cacheKey);
 
@@ -48,6 +77,21 @@ function getLastKnownGoodHoldings(cacheKey) {
 
   if (entry.expiresAt <= Date.now()) {
     lastKnownGoodHoldingsCache.delete(cacheKey);
+    return null;
+  }
+
+  return entry.value;
+}
+
+function getLastKnownGoodChainHoldings(cacheKey) {
+  const entry = chainLastKnownGoodHoldingsCache.get(cacheKey);
+
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    chainLastKnownGoodHoldingsCache.delete(cacheKey);
     return null;
   }
 
@@ -108,6 +152,28 @@ function setCachedHoldings(cacheKey, holdings) {
   );
 }
 
+function setCachedChainHoldings(cacheKey, holdings, { walletId, chainId, enabledChains }) {
+  const isDegraded = isDegradedHoldingsResult(holdings);
+  const ttlMs = isDegraded ? DEGRADED_HOLDINGS_CACHE_TTL_MS : HOLDINGS_CACHE_TTL_MS;
+
+  chainHoldingsCache.set(cacheKey, {
+    value: holdings,
+    expiresAt: Date.now() + ttlMs
+  });
+
+  holdingsLogger.info(
+    {
+      cacheKey,
+      walletId,
+      chainId,
+      enabledChains,
+      ttlMs,
+      isDegraded
+    },
+    isDegraded ? 'Cached degraded per-chain holdings result' : 'Cached per-chain holdings result'
+  );
+}
+
 function setLastKnownGoodHoldings(cacheKey, holdings) {
   if (!isUsableLastKnownGoodHoldingsResult(holdings)) {
     return;
@@ -133,6 +199,31 @@ function setLastKnownGoodHoldings(cacheKey, holdings) {
   );
 }
 
+function setLastKnownGoodChainHoldings(cacheKey, holdings, { walletId, chainId, enabledChains }) {
+  if (!isUsableLastKnownGoodHoldingsResult(holdings)) {
+    return;
+  }
+
+  chainLastKnownGoodHoldingsCache.set(cacheKey, {
+    value: holdings,
+    expiresAt: Date.now() + LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS
+  });
+
+  holdingsLogger.info(
+    {
+      cacheKey,
+      walletId,
+      chainId,
+      enabledChains,
+      ttlMs: LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS,
+      isPartial: holdings.isPartial === true,
+      holdingsCount: Array.isArray(holdings.holdings) ? holdings.holdings.length : 0,
+      totalBalanceUsd: holdings.totalBalanceUsd
+    },
+    'Stored last-known-good per-chain holdings result'
+  );
+}
+
 function buildStaleHoldingsFallback(holdings, partialReason) {
   const existingPartialReasons = Array.isArray(holdings?.partialReasons) ? holdings.partialReasons : [];
   const tokenBalanceReasons = [holdings?.tokenBalancesReason, partialReason].filter(Boolean);
@@ -144,6 +235,194 @@ function buildStaleHoldingsFallback(holdings, partialReason) {
     partialReasons: [...new Set([...existingPartialReasons, partialReason])],
     tokenBalancesReason: tokenBalanceReasons.length > 0 ? [...new Set(tokenBalanceReasons)].join(',') : null
   };
+}
+
+function createChainTimeoutError(chainId) {
+  const error = new Error(`Holdings fetch timed out for ${chainId}`);
+  error.code = 'TIMEOUT';
+  error.chainId = chainId;
+  error.timeoutMs = HOLDINGS_CHAIN_TIMEOUT_MS;
+  return error;
+}
+
+function withTimeout(promise, chainId) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(createChainTimeoutError(chainId));
+    }, HOLDINGS_CHAIN_TIMEOUT_MS);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
+}
+
+function buildChainFetchContext(wallet, chainId, enabledChains, cacheKey) {
+  return {
+    walletId: wallet.id,
+    chainId,
+    enabledChains,
+    cacheKey
+  };
+}
+
+function buildChainLevelTokenBalancesReason(partialReasons, successfulResults) {
+  const chainLevelReasons = partialReasons.filter((reason) =>
+    CHAIN_LEVEL_TOKEN_BALANCE_PARTIAL_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix))
+  );
+  const tokenBalanceReasons = [
+    ...new Set(
+      successfulResults
+        .map((result) => result.tokenBalancesReason)
+        .filter(Boolean)
+        .concat(chainLevelReasons)
+    )
+  ];
+
+  return tokenBalanceReasons.length > 0 ? tokenBalanceReasons.join(',') : null;
+}
+
+function createOrReuseFreshChainHoldingsPromise(wallet, chainId, enabledChains) {
+  const cacheKey = buildChainHoldingsCacheKey(wallet, chainId);
+  const existingPromise = inFlightChainHoldingsPromises.get(cacheKey);
+
+  if (existingPromise) {
+    return {
+      cacheKey,
+      promise: existingPromise,
+      reused: true
+    };
+  }
+
+  const nextPromise = Promise.resolve()
+    .then(() => fetchWalletHoldingsForChain(wallet, chainId))
+    .then((holdings) => {
+      setCachedChainHoldings(cacheKey, holdings, buildChainFetchContext(wallet, chainId, enabledChains, cacheKey));
+      setLastKnownGoodChainHoldings(cacheKey, holdings, buildChainFetchContext(wallet, chainId, enabledChains, cacheKey));
+      return holdings;
+    })
+    .finally(() => {
+      inFlightChainHoldingsPromises.delete(cacheKey);
+    });
+
+  inFlightChainHoldingsPromises.set(cacheKey, nextPromise);
+
+  return {
+    cacheKey,
+    promise: nextPromise,
+    reused: false
+  };
+}
+
+async function resolveChainHoldings(wallet, chainId, enabledChains) {
+  const cacheKey = buildChainHoldingsCacheKey(wallet, chainId);
+  const logContext = buildChainFetchContext(wallet, chainId, enabledChains, cacheKey);
+  const cachedChainHoldings = getCachedChainHoldings(cacheKey);
+
+  if (cachedChainHoldings) {
+    holdingsLogger.info(logContext, 'Per-chain holdings cache hit');
+    return {
+      status: 'available',
+      holdings: cachedChainHoldings,
+      partialReasons: [],
+      source: 'fresh-cache'
+    };
+  }
+
+  const staleChainHoldings = getLastKnownGoodChainHoldings(cacheKey);
+  const { promise: freshChainPromise } = createOrReuseFreshChainHoldingsPromise(wallet, chainId, enabledChains);
+
+  try {
+    const freshChainHoldings = await withTimeout(freshChainPromise, chainId);
+
+    return {
+      status: 'available',
+      holdings: freshChainHoldings,
+      partialReasons: [],
+      source: 'fresh'
+    };
+  } catch (error) {
+    if (error?.code === 'TIMEOUT') {
+      holdingsLogger.warn(
+        {
+          ...logContext,
+          timeoutMs: HOLDINGS_CHAIN_TIMEOUT_MS
+        },
+        'Per-chain holdings fetch timed out'
+      );
+
+      if (staleChainHoldings) {
+        const partialReasons = [
+          `FETCH_TIMEOUT:${chainId}`,
+          `STALE_HOLDINGS_CACHE:${chainId}`
+        ];
+
+        holdingsLogger.warn(
+          {
+            ...logContext,
+            partialReasons
+          },
+          'Serving stale per-chain holdings fallback after timeout'
+        );
+
+        return {
+          status: 'available',
+          holdings: staleChainHoldings,
+          partialReasons,
+          source: 'stale-timeout'
+        };
+      }
+
+      return {
+        status: 'unavailable',
+        partialReasons: [`FETCH_TIMEOUT:${chainId}`],
+        error
+      };
+    }
+
+    holdingsLogger.warn(
+      {
+        ...logContext,
+        err: error
+      },
+      'Per-chain holdings fetch failed'
+    );
+
+    if (staleChainHoldings) {
+      const partialReasons = [
+        `FETCH_FAILED:${chainId}`,
+        `STALE_HOLDINGS_CACHE:${chainId}`
+      ];
+
+      holdingsLogger.warn(
+        {
+          ...logContext,
+          partialReasons
+        },
+        'Serving stale per-chain holdings fallback after failure'
+      );
+
+      return {
+        status: 'available',
+        holdings: staleChainHoldings,
+        partialReasons,
+        source: 'stale-failure'
+      };
+    }
+
+    return {
+      status: 'unavailable',
+      partialReasons: [`FETCH_FAILED:${chainId}`],
+      error
+    };
+  }
 }
 
 export async function getWalletHoldings(walletId) {
@@ -209,27 +488,34 @@ export async function getWalletHoldings(walletId) {
 
   const holdingsPromise = Promise.resolve()
     .then(async () => {
-      const chainResults = await Promise.allSettled(
-        supportedChains.map((chainId) => fetchWalletHoldingsForChain(wallet, chainId))
+      const chainResults = await Promise.all(
+        supportedChains.map((chainId) => resolveChainHoldings(wallet, chainId, enabledChains))
       );
       const partialReasons = unsupportedChains.map((chainId) => buildPartialReason('UNSUPPORTED_CHAIN', chainId));
       const successfulResults = [];
+      const successfulChainSources = [];
+      let firstChainError = null;
 
       for (let index = 0; index < chainResults.length; index += 1) {
         const chainId = supportedChains[index];
         const result = chainResults[index];
 
-        if (result.status === 'fulfilled') {
-          successfulResults.push(result.value);
+        if (result.status === 'available') {
+          successfulResults.push(result.holdings);
+          successfulChainSources.push({
+            chainId,
+            source: result.source
+          });
+          partialReasons.push(...result.partialReasons);
 
-          if (result.value.totalBalanceUsd == null && (result.value.holdings?.length ?? 0) > 0) {
+          if (result.holdings.totalBalanceUsd == null && (result.holdings.holdings?.length ?? 0) > 0) {
             partialReasons.push(buildPartialReason('VALUATION_UNAVAILABLE', chainId));
           }
 
-          if (result.value.tokenBalancesAvailable === false || result.value.tokenBalancesReason) {
+          if (result.holdings.tokenBalancesAvailable === false || result.holdings.tokenBalancesReason) {
             partialReasons.push(
               buildPartialReason(
-                result.value.tokenBalancesReason ?? 'TOKEN_BALANCES_UNAVAILABLE',
+                result.holdings.tokenBalancesReason ?? 'TOKEN_BALANCES_UNAVAILABLE',
                 chainId
               )
             );
@@ -238,20 +524,12 @@ export async function getWalletHoldings(walletId) {
           continue;
         }
 
-        holdingsLogger.warn(
-          {
-            walletId: wallet.id,
-            chainId,
-            err: result.reason
-          },
-          'Failed to fetch holdings for enabled chain; continuing with partial holdings result'
-        );
-        partialReasons.push(buildPartialReason('FETCH_FAILED', chainId));
+        partialReasons.push(...result.partialReasons);
+        firstChainError ??= result.error ?? null;
       }
 
       if (successfulResults.length === 0) {
-        throw chainResults.find((result) => result.status === 'rejected')?.reason
-          ?? new Error('No enabled chain holdings could be fetched.');
+        throw firstChainError ?? new Error('No enabled chain holdings could be fetched.');
       }
 
       const holdings = successfulResults.flatMap((result) => result.holdings ?? []);
@@ -268,19 +546,10 @@ export async function getWalletHoldings(walletId) {
       );
       const tokenBalancesAvailable = successfulResults.every(
         (result) => result.tokenBalancesAvailable !== false
-      ) && !partialReasons.some((reason) => reason.startsWith('FETCH_FAILED:'));
-      const tokenBalanceReasons = [
-        ...new Set(
-          successfulResults
-            .map((result) => result.tokenBalancesReason)
-            .filter(Boolean)
-            .concat(
-              partialReasons.filter((reason) =>
-                reason.startsWith('FETCH_FAILED:') || reason.startsWith('UNSUPPORTED_CHAIN:')
-              )
-            )
-        )
-      ];
+      ) && !partialReasons.some((reason) =>
+        CHAIN_LEVEL_TOKEN_BALANCE_PARTIAL_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix))
+      );
+      const tokenBalanceReason = buildChainLevelTokenBalancesReason(partialReasons, successfulResults);
 
       const aggregatedHoldings = {
         walletId: wallet.id,
@@ -293,7 +562,7 @@ export async function getWalletHoldings(walletId) {
             : null,
         holdings,
         tokenBalancesAvailable,
-        tokenBalancesReason: tokenBalanceReasons.length > 0 ? tokenBalanceReasons.join(',') : null,
+        tokenBalancesReason: tokenBalanceReason,
         isPartial: partialReasons.length > 0,
         partialReasons
       };
@@ -304,6 +573,7 @@ export async function getWalletHoldings(walletId) {
           chainId: wallet.chainId,
           enabledChains,
           successfulChains: successfulResults.map((result) => result.chainId),
+          successfulChainSources,
           holdingsCount: holdings.length,
           totalBalanceUsd: aggregatedHoldings.totalBalanceUsd,
           partialReasons

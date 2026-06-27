@@ -79,7 +79,7 @@ export async function getWalletPerformance(walletId, userId) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
   }
 
-  const summary = await getWalletPortfolioSummary(walletId);
+  const summary = await getWalletPortfolioSummary(walletId, { allowPersistedFallback: false });
   const cutoff = new Date(Date.now() - ONE_DAY_MS).toISOString();
   const snapshot = await findLatestSnapshotAtOrBefore(walletId, cutoff);
 
@@ -103,7 +103,7 @@ export async function getAggregatedPortfolioPerformance(userId) {
   }
 
   const summaries = await Promise.all(
-    supportedWallets.map((wallet) => getWalletPortfolioSummary(wallet.id))
+    supportedWallets.map((wallet) => getWalletPortfolioSummary(wallet.id, { allowPersistedFallback: false }))
   );
 
   const validCurrentValues = summaries
@@ -156,7 +156,7 @@ export async function getAggregatedPortfolioPerformance(userId) {
 }
 
 export async function captureWalletPortfolioSnapshot(wallet) {
-  const summary = await getWalletPortfolioSummary(wallet.id);
+  const summary = await getWalletPortfolioSummary(wallet.id, { allowPersistedFallback: false });
   const capturedAt = new Date().toISOString();
 
   if (summary.isPartial || typeof summary.totalPortfolioUsd !== 'number' || !Number.isFinite(summary.totalPortfolioUsd)) {

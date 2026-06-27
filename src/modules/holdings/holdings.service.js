@@ -3,6 +3,7 @@ import { logger } from '../../config/logger.js';
 import { BASE_MAINNET_CHAIN_ID, ETHEREUM_MAINNET_CHAIN_ID } from '../chains/chains.config.js';
 import { findWalletByIdOnly } from '../wallets/wallets.repository.js';
 import { fetchWalletHoldingsForChain } from './holdings.provider.js';
+import { findWalletChainHoldingsCaches, upsertWalletChainHoldingsCache } from './holdings.repository.js';
 
 const holdingsLogger = logger.child({ module: 'holdings-service' });
 const HOLDINGS_CACHE_TTL_MS = 120 * 1000;
@@ -10,6 +11,7 @@ const AGGREGATED_DEGRADED_HOLDINGS_CACHE_TTL_MS = 15 * 1000;
 const PER_CHAIN_DEGRADED_HOLDINGS_CACHE_TTL_MS = 60 * 1000;
 const LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS = 15 * 60 * 1000;
 const HOLDINGS_CHAIN_TIMEOUT_MS = 8 * 1000;
+const PERSISTED_HOLDINGS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const holdingsCache = new Map();
 const lastKnownGoodHoldingsCache = new Map();
 const inFlightHoldingsPromises = new Map();
@@ -20,15 +22,16 @@ const CHAIN_LEVEL_TOKEN_BALANCE_PARTIAL_REASON_PREFIXES = [
   'FETCH_TIMEOUT:',
   'FETCH_FAILED:',
   'STALE_HOLDINGS_CACHE:',
+  'PERSISTED_HOLDINGS_CACHE:',
   'UNSUPPORTED_CHAIN:'
 ];
 
-function buildHoldingsCacheKey(wallet) {
+function buildHoldingsCacheKey(wallet, { allowPersistedFallback = true, requireLive = false } = {}) {
   const enabledChains = Array.isArray(wallet.enabledChains) && wallet.enabledChains.length > 0
     ? [...new Set(wallet.enabledChains)].sort()
     : [wallet.chainId];
 
-  return `${wallet.id}:${enabledChains.join('|')}`;
+  return `${wallet.id}:${enabledChains.join('|')}:persisted=${allowPersistedFallback ? '1' : '0'}:live=${requireLive ? '1' : '0'}`;
 }
 
 function buildChainHoldingsCacheKey(wallet, chainId) {
@@ -39,7 +42,7 @@ function supportsHoldingsForChain(chainId) {
   return chainId === ETHEREUM_MAINNET_CHAIN_ID || chainId === BASE_MAINNET_CHAIN_ID;
 }
 
-function getCachedHoldings(cacheKey) {
+function getCachedHoldings(cacheKey, { requireLive = false } = {}) {
   const entry = holdingsCache.get(cacheKey);
 
   if (!entry) {
@@ -51,10 +54,14 @@ function getCachedHoldings(cacheKey) {
     return null;
   }
 
+  if (requireLive && entry.source === 'persisted') {
+    return null;
+  }
+
   return entry.value;
 }
 
-function getCachedChainHoldings(cacheKey) {
+function getCachedChainHoldings(cacheKey, { requireLive = false } = {}) {
   const entry = chainHoldingsCache.get(cacheKey);
 
   if (!entry) {
@@ -66,10 +73,14 @@ function getCachedChainHoldings(cacheKey) {
     return null;
   }
 
+  if (requireLive && entry.source === 'persisted') {
+    return null;
+  }
+
   return entry.value;
 }
 
-function getLastKnownGoodHoldings(cacheKey) {
+function getLastKnownGoodHoldings(cacheKey, { requireLive = false } = {}) {
   const entry = lastKnownGoodHoldingsCache.get(cacheKey);
 
   if (!entry) {
@@ -81,10 +92,14 @@ function getLastKnownGoodHoldings(cacheKey) {
     return null;
   }
 
+  if (requireLive && entry.source === 'persisted') {
+    return null;
+  }
+
   return entry.value;
 }
 
-function getLastKnownGoodChainHoldings(cacheKey) {
+function getLastKnownGoodChainHoldings(cacheKey, { requireLive = false } = {}) {
   const entry = chainLastKnownGoodHoldingsCache.get(cacheKey);
 
   if (!entry) {
@@ -93,6 +108,10 @@ function getLastKnownGoodChainHoldings(cacheKey) {
 
   if (entry.expiresAt <= Date.now()) {
     chainLastKnownGoodHoldingsCache.delete(cacheKey);
+    return null;
+  }
+
+  if (requireLive && entry.source === 'persisted') {
     return null;
   }
 
@@ -132,13 +151,14 @@ function buildPartialReason(kind, chainId) {
   return `${kind}:${chainId}`;
 }
 
-function setCachedHoldings(cacheKey, holdings) {
+function setCachedHoldings(cacheKey, holdings, { source = 'live' } = {}) {
   const isDegraded = isDegradedHoldingsResult(holdings);
   const ttlMs = isDegraded ? AGGREGATED_DEGRADED_HOLDINGS_CACHE_TTL_MS : HOLDINGS_CACHE_TTL_MS;
 
   holdingsCache.set(cacheKey, {
     value: holdings,
-    expiresAt: Date.now() + ttlMs
+    expiresAt: Date.now() + ttlMs,
+    source
   });
 
   holdingsLogger.info(
@@ -147,19 +167,21 @@ function setCachedHoldings(cacheKey, holdings) {
       walletId: holdings.walletId,
       chainId: holdings.chainId,
       ttlMs,
-      isDegraded
+      isDegraded,
+      source
     },
     isDegraded ? 'Cached degraded holdings result' : 'Cached holdings result'
   );
 }
 
-function setCachedChainHoldings(cacheKey, holdings, { walletId, chainId, enabledChains }) {
+function setCachedChainHoldings(cacheKey, holdings, { walletId, chainId, enabledChains, source = 'live' }) {
   const isDegraded = isDegradedHoldingsResult(holdings);
   const ttlMs = isDegraded ? PER_CHAIN_DEGRADED_HOLDINGS_CACHE_TTL_MS : HOLDINGS_CACHE_TTL_MS;
 
   chainHoldingsCache.set(cacheKey, {
     value: holdings,
-    expiresAt: Date.now() + ttlMs
+    expiresAt: Date.now() + ttlMs,
+    source
   });
 
   holdingsLogger.info(
@@ -169,20 +191,22 @@ function setCachedChainHoldings(cacheKey, holdings, { walletId, chainId, enabled
       chainId,
       enabledChains,
       ttlMs,
-      isDegraded
+      isDegraded,
+      source
     },
     isDegraded ? 'Cached degraded per-chain holdings result' : 'Cached per-chain holdings result'
   );
 }
 
-function setLastKnownGoodHoldings(cacheKey, holdings) {
+function setLastKnownGoodHoldings(cacheKey, holdings, { source = 'live' } = {}) {
   if (!isUsableLastKnownGoodHoldingsResult(holdings)) {
     return;
   }
 
   lastKnownGoodHoldingsCache.set(cacheKey, {
     value: holdings,
-    expiresAt: Date.now() + LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS
+    expiresAt: Date.now() + LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS,
+    source
   });
 
   holdingsLogger.info(
@@ -194,20 +218,22 @@ function setLastKnownGoodHoldings(cacheKey, holdings) {
       ttlMs: LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS,
       isPartial: holdings.isPartial === true,
       holdingsCount: Array.isArray(holdings.holdings) ? holdings.holdings.length : 0,
-      totalBalanceUsd: holdings.totalBalanceUsd
+      totalBalanceUsd: holdings.totalBalanceUsd,
+      source
     },
     'Stored last-known-good holdings result'
   );
 }
 
-function setLastKnownGoodChainHoldings(cacheKey, holdings, { walletId, chainId, enabledChains }) {
+function setLastKnownGoodChainHoldings(cacheKey, holdings, { walletId, chainId, enabledChains, source = 'live' }) {
   if (!isUsableLastKnownGoodHoldingsResult(holdings)) {
     return;
   }
 
   chainLastKnownGoodHoldingsCache.set(cacheKey, {
     value: holdings,
-    expiresAt: Date.now() + LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS
+    expiresAt: Date.now() + LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS,
+    source
   });
 
   holdingsLogger.info(
@@ -219,7 +245,8 @@ function setLastKnownGoodChainHoldings(cacheKey, holdings, { walletId, chainId, 
       ttlMs: LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS,
       isPartial: holdings.isPartial === true,
       holdingsCount: Array.isArray(holdings.holdings) ? holdings.holdings.length : 0,
-      totalBalanceUsd: holdings.totalBalanceUsd
+      totalBalanceUsd: holdings.totalBalanceUsd,
+      source
     },
     'Stored last-known-good per-chain holdings result'
   );
@@ -334,6 +361,167 @@ function buildChainLevelTokenBalancesReason(partialReasons, successfulResults) {
   return tokenBalanceReasons.length > 0 ? tokenBalanceReasons.join(',') : null;
 }
 
+function isPersistableChainHoldingsResult(holdings) {
+  return isUsableLastKnownGoodHoldingsResult(holdings);
+}
+
+function buildPersistedPartialReasons(chainIds) {
+  return chainIds.map((chainId) => buildPartialReason('PERSISTED_HOLDINGS_CACHE', chainId));
+}
+
+function aggregateHoldingsResults(wallet, enabledChains, successfulResults, partialReasons) {
+  const holdings = successfulResults.flatMap((result) => result.holdings ?? []);
+  const hasAnyHoldings = holdings.length > 0;
+  const totalBalanceUsdSum = successfulResults.reduce((sum, result) => {
+    if (typeof result.totalBalanceUsd !== 'number' || !Number.isFinite(result.totalBalanceUsd)) {
+      return sum;
+    }
+
+    return sum + result.totalBalanceUsd;
+  }, 0);
+  const hasAnyValuedHoldings = successfulResults.some(
+    (result) => typeof result.totalBalanceUsd === 'number' && Number.isFinite(result.totalBalanceUsd)
+  );
+  const tokenBalancesAvailable = successfulResults.every(
+    (result) => result.tokenBalancesAvailable !== false
+  ) && !partialReasons.some((reason) =>
+    CHAIN_LEVEL_TOKEN_BALANCE_PARTIAL_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix))
+  );
+  const tokenBalanceReason = buildChainLevelTokenBalancesReason(partialReasons, successfulResults);
+
+  return {
+    walletId: wallet.id,
+    chainId: wallet.chainId,
+    enabledChains,
+    totalBalanceUsd: !hasAnyHoldings
+      ? 0
+      : hasAnyValuedHoldings
+        ? Number(totalBalanceUsdSum.toFixed(2))
+        : null,
+    holdings,
+    tokenBalancesAvailable,
+    tokenBalancesReason: tokenBalanceReason,
+    isPartial: partialReasons.length > 0,
+    partialReasons
+  };
+}
+
+async function persistChainHoldingsResult(wallet, chainId, holdings) {
+  if (!isPersistableChainHoldingsResult(holdings)) {
+    return;
+  }
+
+  try {
+    const persistedRow = await upsertWalletChainHoldingsCache({
+      walletId: wallet.id,
+      walletAddress: wallet.address,
+      chainId,
+      payload: holdings,
+      holdingsCount: Array.isArray(holdings.holdings) ? holdings.holdings.length : 0,
+      totalBalanceUsd: holdings.totalBalanceUsd,
+      tokenBalancesAvailable: holdings.tokenBalancesAvailable === true,
+      isPartial: holdings.isPartial === true,
+      capturedAt: new Date().toISOString()
+    });
+
+    holdingsLogger.info(
+      {
+        walletId: wallet.id,
+        chainId,
+        holdingsCount: persistedRow.holdingsCount,
+        totalBalanceUsd: persistedRow.totalBalanceUsd,
+        isPartial: persistedRow.isPartial,
+        capturedAt: persistedRow.capturedAt
+      },
+      'Persisted holdings cache row upserted'
+    );
+  } catch (error) {
+    holdingsLogger.warn(
+      {
+        walletId: wallet.id,
+        chainId,
+        err: error
+      },
+      'Failed to persist per-chain holdings cache row'
+    );
+  }
+}
+
+async function loadPersistedChainHoldings(wallet, chainIds) {
+  const persistedRows = await findWalletChainHoldingsCaches({
+    walletId: wallet.id,
+    walletAddress: wallet.address,
+    chainIds,
+    maxAgeMs: PERSISTED_HOLDINGS_MAX_AGE_MS
+  });
+
+  if (persistedRows.length === 0) {
+    return [];
+  }
+
+  holdingsLogger.info(
+    {
+      walletId: wallet.id,
+      chainIds: persistedRows.map((row) => row.chainId),
+      rowCount: persistedRows.length,
+      maxAgeMs: PERSISTED_HOLDINGS_MAX_AGE_MS
+    },
+    'Persisted holdings cache loaded'
+  );
+
+  return persistedRows
+    .map((row) => {
+      const payload = row.payload;
+
+      if (!payload || typeof payload !== 'object') {
+        return null;
+      }
+
+      return {
+        chainId: row.chainId,
+        holdings: payload
+      };
+    })
+    .filter(Boolean);
+}
+
+function hydratePersistedChainHoldingsToMemory(wallet, enabledChains, persistedChainResults) {
+  for (const result of persistedChainResults) {
+    const cacheKey = buildChainHoldingsCacheKey(wallet, result.chainId);
+    setLastKnownGoodChainHoldings(
+      cacheKey,
+      result.holdings,
+      {
+        walletId: wallet.id,
+        chainId: result.chainId,
+        enabledChains,
+        source: 'persisted'
+      }
+    );
+  }
+}
+
+function buildPersistedAggregatedHoldings(wallet, enabledChains, persistedChainResults, unsupportedChains) {
+  const partialReasons = [
+    ...unsupportedChains.map((chainId) => buildPartialReason('UNSUPPORTED_CHAIN', chainId)),
+    ...buildPersistedPartialReasons(persistedChainResults.map((result) => result.chainId))
+  ];
+
+  const aggregatedHoldings = aggregateHoldingsResults(
+    wallet,
+    enabledChains,
+    persistedChainResults.map((result) => result.holdings),
+    partialReasons
+  );
+
+  return {
+    ...aggregatedHoldings,
+    tokenBalancesAvailable: false,
+    tokenBalancesReason: aggregatedHoldings.tokenBalancesReason
+      ?? partialReasons.join(',')
+  };
+}
+
 function createOrReuseFreshChainHoldingsPromise(wallet, chainId, enabledChains) {
   const cacheKey = buildChainHoldingsCacheKey(wallet, chainId);
   const existingPromise = inFlightChainHoldingsPromises.get(cacheKey);
@@ -348,9 +536,10 @@ function createOrReuseFreshChainHoldingsPromise(wallet, chainId, enabledChains) 
 
   const nextPromise = Promise.resolve()
     .then(() => fetchWalletHoldingsForChain(wallet, chainId))
-    .then((holdings) => {
+    .then(async (holdings) => {
       setCachedChainHoldings(cacheKey, holdings, buildChainFetchContext(wallet, chainId, enabledChains, cacheKey));
       setLastKnownGoodChainHoldings(cacheKey, holdings, buildChainFetchContext(wallet, chainId, enabledChains, cacheKey));
+      await persistChainHoldingsResult(wallet, chainId, holdings);
       return holdings;
     })
     .finally(() => {
@@ -366,10 +555,10 @@ function createOrReuseFreshChainHoldingsPromise(wallet, chainId, enabledChains) 
   };
 }
 
-async function resolveChainHoldings(wallet, chainId, enabledChains) {
+async function resolveChainHoldings(wallet, chainId, enabledChains, { requireLive = false } = {}) {
   const cacheKey = buildChainHoldingsCacheKey(wallet, chainId);
   const logContext = buildChainFetchContext(wallet, chainId, enabledChains, cacheKey);
-  const cachedChainHoldings = getCachedChainHoldings(cacheKey);
+  const cachedChainHoldings = getCachedChainHoldings(cacheKey, { requireLive });
 
   if (cachedChainHoldings) {
     holdingsLogger.info(logContext, 'Per-chain holdings cache hit');
@@ -381,7 +570,7 @@ async function resolveChainHoldings(wallet, chainId, enabledChains) {
     };
   }
 
-  const staleChainHoldings = getLastKnownGoodChainHoldings(cacheKey);
+  const staleChainHoldings = getLastKnownGoodChainHoldings(cacheKey, { requireLive });
   const { promise: freshChainPromise } = createOrReuseFreshChainHoldingsPromise(wallet, chainId, enabledChains);
 
   try {
@@ -470,7 +659,13 @@ async function resolveChainHoldings(wallet, chainId, enabledChains) {
   }
 }
 
-export async function getWalletHoldings(walletId) {
+export async function getWalletHoldings(
+  walletId,
+  {
+    allowPersistedFallback = true,
+    requireLive = false
+  } = {}
+) {
   const wallet = await findWalletByIdOnly(walletId);
 
   if (!wallet) {
@@ -489,9 +684,13 @@ export async function getWalletHoldings(walletId) {
     );
   }
 
-  const cacheKey = buildHoldingsCacheKey(wallet);
-  const cachedHoldings = getCachedHoldings(cacheKey);
-  const lastKnownGoodHoldings = getLastKnownGoodHoldings(cacheKey);
+  const effectiveAllowPersistedFallback = requireLive ? false : allowPersistedFallback;
+  const cacheKey = buildHoldingsCacheKey(wallet, {
+    allowPersistedFallback: effectiveAllowPersistedFallback,
+    requireLive
+  });
+  const cachedHoldings = getCachedHoldings(cacheKey, { requireLive });
+  const lastKnownGoodHoldings = getLastKnownGoodHoldings(cacheKey, { requireLive });
 
   if (cachedHoldings) {
     holdingsLogger.info(
@@ -504,6 +703,49 @@ export async function getWalletHoldings(walletId) {
       'Holdings cache hit'
     );
     return cachedHoldings;
+  }
+
+  holdingsLogger.info(
+    {
+      cacheKey,
+      walletId: wallet.id,
+      chainId: wallet.chainId,
+      enabledChains,
+      allowPersistedFallback: effectiveAllowPersistedFallback,
+      requireLive
+    },
+    'Holdings cache miss'
+  );
+
+  if (effectiveAllowPersistedFallback) {
+    const persistedChainResults = await loadPersistedChainHoldings(wallet, supportedChains);
+
+    if (persistedChainResults.length > 0) {
+      hydratePersistedChainHoldingsToMemory(wallet, enabledChains, persistedChainResults);
+
+      const persistedFallback = buildPersistedAggregatedHoldings(
+        wallet,
+        enabledChains,
+        persistedChainResults,
+        unsupportedChains
+      );
+
+      setCachedHoldings(cacheKey, persistedFallback, { source: 'persisted' });
+      setLastKnownGoodHoldings(cacheKey, persistedFallback, { source: 'persisted' });
+
+      holdingsLogger.warn(
+        {
+          walletId: wallet.id,
+          chainId: wallet.chainId,
+          enabledChains,
+          persistedChains: persistedChainResults.map((result) => result.chainId),
+          partialReasons: persistedFallback.partialReasons
+        },
+        'Persisted holdings fallback served'
+      );
+
+      return persistedFallback;
+    }
   }
 
   const existingPromise = inFlightHoldingsPromises.get(cacheKey);
@@ -521,20 +763,10 @@ export async function getWalletHoldings(walletId) {
     return existingPromise;
   }
 
-  holdingsLogger.info(
-    {
-      cacheKey,
-      walletId: wallet.id,
-      chainId: wallet.chainId,
-      enabledChains
-    },
-    'Holdings cache miss'
-  );
-
   const holdingsPromise = Promise.resolve()
     .then(async () => {
       const chainResults = await Promise.allSettled(
-        supportedChains.map((chainId) => resolveChainHoldings(wallet, chainId, enabledChains))
+        supportedChains.map((chainId) => resolveChainHoldings(wallet, chainId, enabledChains, { requireLive }))
       );
       const partialReasons = unsupportedChains.map((chainId) => buildPartialReason('UNSUPPORTED_CHAIN', chainId));
       const successfulResults = [];
@@ -636,7 +868,10 @@ export async function getWalletHoldings(walletId) {
 
         const staleChainResults = supportedChains
           .map((chainId) => {
-            const staleHoldings = getLastKnownGoodChainHoldings(buildChainHoldingsCacheKey(wallet, chainId));
+            const staleHoldings = getLastKnownGoodChainHoldings(
+              buildChainHoldingsCacheKey(wallet, chainId),
+              { requireLive }
+            );
 
             if (!staleHoldings) {
               return null;

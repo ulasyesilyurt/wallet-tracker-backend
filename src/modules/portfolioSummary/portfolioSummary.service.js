@@ -55,8 +55,8 @@ function summarizePositions(positions) {
   };
 }
 
-function buildPortfolioSummaryCacheKey(walletId, { includePositions = true } = {}) {
-  return `${walletId}:includePositions=${includePositions ? 'true' : 'false'}`;
+function buildPortfolioSummaryCacheKey(walletId, { includePositions = true, allowPersistedFallback = true } = {}) {
+  return `${walletId}:includePositions=${includePositions ? 'true' : 'false'}:persisted=${allowPersistedFallback ? '1' : '0'}`;
 }
 
 function getCachedPortfolioSummary(walletId, options) {
@@ -104,18 +104,27 @@ function getOrCreateInFlightPortfolioSummaryPromise(walletId, options, factory) 
   return nextPromise;
 }
 
-export async function getWalletPortfolioSummary(walletId, { includePositions = true } = {}) {
-  const cachedSummary = getCachedPortfolioSummary(walletId, { includePositions });
+export async function getWalletPortfolioSummary(
+  walletId,
+  {
+    includePositions = true,
+    allowPersistedFallback = true
+  } = {}
+) {
+  const cachedSummary = getCachedPortfolioSummary(walletId, { includePositions, allowPersistedFallback });
 
   if (cachedSummary) {
-    portfolioSummaryLogger.info({ walletId, includePositions }, 'Portfolio summary cache hit');
+    portfolioSummaryLogger.info({ walletId, includePositions, allowPersistedFallback }, 'Portfolio summary cache hit');
     return cachedSummary;
   }
 
-  portfolioSummaryLogger.info({ walletId, includePositions }, 'Portfolio summary cache miss');
+  portfolioSummaryLogger.info({ walletId, includePositions, allowPersistedFallback }, 'Portfolio summary cache miss');
 
-  return getOrCreateInFlightPortfolioSummaryPromise(walletId, { includePositions }, async () => {
-    const holdingsPromise = getWalletHoldings(walletId);
+  return getOrCreateInFlightPortfolioSummaryPromise(walletId, { includePositions, allowPersistedFallback }, async () => {
+    const holdingsPromise = getWalletHoldings(walletId, {
+      allowPersistedFallback,
+      requireLive: allowPersistedFallback === false
+    });
     const positionsPromise = includePositions
       ? getWalletPositions(walletId)
       : getCachedWalletPositions(walletId);
@@ -234,7 +243,7 @@ export async function getWalletPortfolioSummary(walletId, { includePositions = t
         : [holdings.chainId]
     };
 
-    setCachedPortfolioSummary(walletId, summary, { includePositions });
+    setCachedPortfolioSummary(walletId, summary, { includePositions, allowPersistedFallback });
 
     portfolioSummaryLogger.info(
       {

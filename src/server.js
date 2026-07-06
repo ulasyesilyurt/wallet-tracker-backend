@@ -6,12 +6,14 @@ import { EthereumWalletActivityTracker } from './modules/ethereum/ethereum.track
 import { BASE_MAINNET_CHAIN_ID, ETHEREUM_MAINNET_CHAIN_ID } from './modules/chains/chains.config.js';
 import { getAlchemyAddressActivityWebhookIdForChain } from './modules/webhooks/alchemyAddressSync.service.js';
 import { PortfolioSnapshotJob } from './modules/performance/performance.job.js';
+import { NotificationOutboxWorker } from './modules/notifications/notificationOutbox.worker.js';
 
 const app = createApp();
 const ethereumTracker = env.ENABLE_ETHEREUM_TRACKER ? new EthereumWalletActivityTracker() : null;
 const portfolioSnapshotJob = env.ENABLE_PORTFOLIO_SNAPSHOT_JOB
   ? new PortfolioSnapshotJob({ intervalMs: env.PORTFOLIO_SNAPSHOT_INTERVAL_MS })
   : null;
+const notificationOutboxWorker = new NotificationOutboxWorker();
 
 const server = app.listen(env.PORT, () => {
   logger.info(
@@ -20,7 +22,8 @@ const server = app.listen(env.PORT, () => {
       realtimeMode: 'alchemy_webhook_primary',
       webhookEndpoint: '/api/v1/webhooks/alchemy',
       pollingTrackerEnabled: Boolean(ethereumTracker),
-      portfolioSnapshotJobEnabled: Boolean(portfolioSnapshotJob)
+      portfolioSnapshotJobEnabled: Boolean(portfolioSnapshotJob),
+      notificationOutboxWorkerEnabled: true
     },
     'Wallet tracker backend is running'
   );
@@ -70,6 +73,13 @@ const server = app.listen(env.PORT, () => {
       'Portfolio snapshot job is disabled; 24h performance data will not accumulate'
     );
   }
+
+  logger.info(
+    {
+      notificationOutboxWorkerEnabled: true
+    },
+    'Notification outbox worker is enabled; push delivery is decoupled from wallet event ingestion'
+  );
 });
 
 if (ethereumTracker) {
@@ -84,10 +94,15 @@ if (portfolioSnapshotJob) {
   });
 }
 
+notificationOutboxWorker.start().catch((error) => {
+  logger.error({ err: error }, 'Failed to start notification outbox worker');
+});
+
 async function shutdown(signal) {
   logger.info({ signal }, 'Shutting down gracefully');
   await ethereumTracker?.stop();
   await portfolioSnapshotJob?.stop();
+  await notificationOutboxWorker.stop();
   server.close(async () => {
     await pool.end();
     process.exit(0);

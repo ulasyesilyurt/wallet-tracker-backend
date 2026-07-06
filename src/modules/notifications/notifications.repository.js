@@ -1,3 +1,4 @@
+import { pool } from '../../db/pool.js';
 import { query } from '../../db/query.js';
 
 export async function getWalletNotificationTarget(walletId) {
@@ -68,6 +69,205 @@ export async function upsertNotificationDelivery({
     `,
     [walletEventId, deviceTokenId, status, providerMessageId, errorMessage, sentAt]
   );
+}
+
+export async function enqueueNotificationOutbox(client, walletEventId) {
+  const result = await client.query(
+    `
+      INSERT INTO notification_outbox (
+        wallet_event_id,
+        status,
+        attempt_count,
+        next_attempt_at,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, 'pending', 0, NOW(), NOW(), NOW())
+      ON CONFLICT (wallet_event_id) DO NOTHING
+      RETURNING id, wallet_event_id, status, attempt_count, next_attempt_at, locked_at, last_error, processed_at, created_at, updated_at
+    `,
+    [walletEventId]
+  );
+
+  return result.rows[0]
+    ? {
+      id: result.rows[0].id,
+      walletEventId: result.rows[0].wallet_event_id,
+      status: result.rows[0].status,
+      attemptCount: Number(result.rows[0].attempt_count ?? 0),
+      nextAttemptAt: result.rows[0].next_attempt_at,
+      lockedAt: result.rows[0].locked_at,
+      lastError: result.rows[0].last_error,
+      processedAt: result.rows[0].processed_at,
+      createdAt: result.rows[0].created_at,
+      updatedAt: result.rows[0].updated_at
+    }
+    : null;
+}
+
+function mapNotificationOutboxRow(row) {
+  return {
+    id: row.id,
+    walletEventId: row.wallet_event_id,
+    status: row.status,
+    attemptCount: Number(row.attempt_count ?? 0),
+    nextAttemptAt: row.next_attempt_at,
+    lockedAt: row.locked_at,
+    lastError: row.last_error,
+    processedAt: row.processed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export async function claimNotificationOutboxJobs({ limit, staleProcessingBefore }) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `
+        WITH candidates AS (
+          SELECT no.id
+          FROM notification_outbox no
+          WHERE (
+            no.status = 'pending'
+            AND no.next_attempt_at <= NOW()
+          ) OR (
+            no.status = 'processing'
+            AND no.locked_at IS NOT NULL
+            AND no.locked_at <= $2
+          )
+          ORDER BY no.next_attempt_at ASC, no.created_at ASC
+          LIMIT $1
+          FOR UPDATE SKIP LOCKED
+        )
+        UPDATE notification_outbox no
+        SET status = 'processing',
+            attempt_count = no.attempt_count + 1,
+            locked_at = NOW(),
+            updated_at = NOW()
+        FROM candidates
+        WHERE no.id = candidates.id
+        RETURNING
+          no.id,
+          no.wallet_event_id,
+          no.status,
+          no.attempt_count,
+          no.next_attempt_at,
+          no.locked_at,
+          no.last_error,
+          no.processed_at,
+          no.created_at,
+          no.updated_at
+      `,
+      [limit, staleProcessingBefore]
+    );
+
+    await client.query('COMMIT');
+    return result.rows.map(mapNotificationOutboxRow);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function markNotificationOutboxSent(outboxId) {
+  await query(
+    `
+      UPDATE notification_outbox
+      SET status = 'sent',
+          locked_at = NULL,
+          last_error = NULL,
+          processed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [outboxId]
+  );
+}
+
+export async function scheduleNotificationOutboxRetry(outboxId, { nextAttemptAt, errorMessage }) {
+  await query(
+    `
+      UPDATE notification_outbox
+      SET status = 'pending',
+          locked_at = NULL,
+          next_attempt_at = $2,
+          last_error = $3,
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [outboxId, nextAttemptAt, errorMessage]
+  );
+}
+
+export async function markNotificationOutboxFailed(outboxId, { errorMessage }) {
+  await query(
+    `
+      UPDATE notification_outbox
+      SET status = 'failed',
+          locked_at = NULL,
+          last_error = $2,
+          processed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [outboxId, errorMessage]
+  );
+}
+
+function mapWalletEventNotificationContext(row) {
+  return {
+    id: row.wallet_event_id,
+    walletId: row.wallet_id,
+    userId: row.user_id,
+    walletLabel: row.wallet_label,
+    walletAddress: row.wallet_address,
+    chainId: row.chain_id,
+    transactionHash: row.transaction_hash,
+    eventType: row.event_type,
+    assetType: row.asset_type,
+    assetSymbol: row.asset_symbol,
+    assetName: row.asset_name,
+    amount: row.amount != null ? row.amount.toString() : null,
+    fromAddress: row.from_address,
+    toAddress: row.to_address,
+    occurredAt: row.occurred_at
+  };
+}
+
+export async function getWalletEventNotificationContext(walletEventId) {
+  const result = await query(
+    `
+      SELECT
+        we.id AS wallet_event_id,
+        we.wallet_id,
+        we.chain_id,
+        we.transaction_hash,
+        we.event_type,
+        we.asset_type,
+        we.asset_symbol,
+        we.asset_name,
+        we.amount,
+        we.from_address,
+        we.to_address,
+        we.occurred_at,
+        tw.user_id,
+        tw.label AS wallet_label,
+        tw.address AS wallet_address
+      FROM wallet_events we
+      INNER JOIN tracked_wallets tw ON tw.id = we.wallet_id
+      WHERE we.id = $1
+      LIMIT 1
+    `,
+    [walletEventId]
+  );
+
+  return result.rows[0] ? mapWalletEventNotificationContext(result.rows[0]) : null;
 }
 
 function mapNotificationHistoryRow(row) {

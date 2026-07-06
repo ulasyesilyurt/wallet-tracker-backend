@@ -1,5 +1,6 @@
+import { pool } from '../../db/pool.js';
 import { query } from '../../db/query.js';
-import { notifyWalletEvent } from '../notifications/notifications.service.js';
+import { enqueueNotificationOutbox } from '../notifications/notifications.repository.js';
 
 function mapWalletEvent(row) {
   return {
@@ -71,61 +72,88 @@ export async function insertWalletEvents(events, logger = null) {
       logIndex: event.logIndex
     }, 'About to insert wallet event into database');
 
-    const result = await query(
-      `
-        INSERT INTO wallet_events (
-          wallet_id,
-          chain_id,
-          transaction_hash,
-          event_type,
-          asset_type,
-          asset_symbol,
-          asset_name,
-          amount,
-          token_contract_address,
-          nft_contract_address,
-          nft_token_id,
-          marketplace,
-          occurred_at,
-          explorer_url,
-          raw_payload,
-          block_number,
-          log_index,
-          from_address,
-          to_address,
-          amount_wei,
-          direction
-        )
-        VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21
-        )
-        ON CONFLICT DO NOTHING
-        RETURNING id, wallet_id, transaction_hash, event_type, asset_type, occurred_at
-      `,
-      [
-        event.walletId,
-        event.chainId,
-        event.transactionHash,
-        event.eventType,
-        event.assetType,
-        event.assetSymbol,
-        event.assetName,
-        event.amount,
-        event.tokenContractAddress,
-        event.nftContractAddress,
-        event.nftTokenId,
-        event.marketplace,
-        event.occurredAt,
-        event.explorerUrl,
-        JSON.stringify(event.rawPayload),
-        event.blockNumber,
-        event.logIndex,
-        event.fromAddress,
-        event.toAddress,
-        event.amountWei,
-        event.direction
-      ]
-    );
+    const client = await pool.connect();
+    let result;
+
+    try {
+      await client.query('BEGIN');
+      result = await client.query(
+        `
+          INSERT INTO wallet_events (
+            wallet_id,
+            chain_id,
+            transaction_hash,
+            event_type,
+            asset_type,
+            asset_symbol,
+            asset_name,
+            amount,
+            token_contract_address,
+            nft_contract_address,
+            nft_token_id,
+            marketplace,
+            occurred_at,
+            explorer_url,
+            raw_payload,
+            block_number,
+            log_index,
+            from_address,
+            to_address,
+            amount_wei,
+            direction
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21
+          )
+          ON CONFLICT DO NOTHING
+          RETURNING id, wallet_id, transaction_hash, event_type, asset_type, occurred_at
+        `,
+        [
+          event.walletId,
+          event.chainId,
+          event.transactionHash,
+          event.eventType,
+          event.assetType,
+          event.assetSymbol,
+          event.assetName,
+          event.amount,
+          event.tokenContractAddress,
+          event.nftContractAddress,
+          event.nftTokenId,
+          event.marketplace,
+          event.occurredAt,
+          event.explorerUrl,
+          JSON.stringify(event.rawPayload),
+          event.blockNumber,
+          event.logIndex,
+          event.fromAddress,
+          event.toAddress,
+          event.amountWei,
+          event.direction
+        ]
+      );
+
+      if (result.rows[0]) {
+        const outboxJob = await enqueueNotificationOutbox(client, result.rows[0].id);
+
+        logger?.info(
+          {
+            walletEventId: result.rows[0].id,
+            walletId: event.walletId,
+            transactionHash: event.transactionHash,
+            outboxJobId: outboxJob?.id ?? null
+          },
+          'Notification outbox job enqueued for inserted wallet event'
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
 
     logger?.info({
       transactionHash: event.transactionHash,
@@ -186,26 +214,6 @@ export async function insertWalletEvents(events, logger = null) {
         eventType: event.eventType,
         insertOutcome: 'inserted'
       }, 'Wallet event inserted successfully');
-
-      try {
-        logger?.info({
-          walletEventId: insertedEvent.id,
-          walletId: insertedEvent.walletId,
-          transactionHash: insertedEvent.transactionHash,
-          eventType: insertedEvent.eventType
-        }, 'Starting wallet event notification dispatch after insert');
-
-        await notifyWalletEvent(insertedEvent);
-
-        logger?.info({
-          walletEventId: insertedEvent.id,
-          walletId: insertedEvent.walletId,
-          transactionHash: insertedEvent.transactionHash,
-          eventType: insertedEvent.eventType
-        }, 'Wallet event notification dispatch completed');
-      } catch (error) {
-        logger?.error({ err: error, walletEventId: insertedEvent.id }, 'Wallet event notification pipeline failed');
-      }
     } else {
       logger?.info({
         transactionHash: event.transactionHash,

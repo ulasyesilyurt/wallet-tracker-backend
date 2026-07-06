@@ -138,6 +138,34 @@ npm run migrate
 npm run dev
 ```
 
+## Continuous integration
+
+The repository includes a minimal GitHub Actions workflow at
+[`/.github/workflows/backend-ci.yml`](/Users/ulas/Documents/New%20project/.github/workflows/backend-ci.yml).
+
+It runs on `push` and `pull_request` and will:
+
+- install dependencies with `npm ci`
+- start a temporary PostgreSQL service
+- run `npm run migrate`
+- run optional `lint`, `typecheck`, or `check` scripts if they exist
+- run `npm test`
+
+### CI environment used for tests
+
+The current backend tests require a PostgreSQL database plus a JWT secret. The workflow provides:
+
+```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/wallet_tracker_test
+JWT_SECRET=dev_jwt_secret_that_is_long_enough_for_local_checks
+NODE_ENV=test
+ENABLE_PUSH_NOTIFICATIONS=false
+ENABLE_ETHEREUM_TRACKER=false
+ENABLE_PORTFOLIO_SNAPSHOT_JOB=false
+```
+
+No real provider API keys are required for the current test suite.
+
 ### Webhook-first config guidance
 
 For normal real-time notification mode, keep the polling tracker disabled:

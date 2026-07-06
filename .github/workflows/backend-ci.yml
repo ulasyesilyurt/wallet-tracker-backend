@@ -1,0 +1,74 @@
+name: Backend CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: wallet_tracker_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wallet_tracker_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/wallet_tracker_test
+      JWT_SECRET: dev_jwt_secret_that_is_long_enough_for_local_checks
+      NODE_ENV: test
+      ENABLE_PUSH_NOTIFICATIONS: false
+      ENABLE_ETHEREUM_TRACKER: false
+      ENABLE_PORTFOLIO_SNAPSHOT_JOB: false
+      LOG_LEVEL: info
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run database migrations
+        run: npm run migrate
+
+      - name: Run optional quality checks
+        run: |
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            import { spawnSync } from 'node:child_process';
+
+            const scripts = JSON.parse(fs.readFileSync('package.json', 'utf8')).scripts ?? {};
+            const checks = ['lint', 'typecheck', 'check'];
+
+            for (const name of checks) {
+              if (!scripts[name]) {
+                console.log(`Skipping npm run ${name} (not configured)`);
+                continue;
+              }
+
+              console.log(`Running npm run ${name}`);
+              const result = spawnSync('npm', ['run', name], { stdio: 'inherit' });
+
+              if (result.status !== 0) {
+                process.exit(result.status ?? 1);
+              }
+            }
+          "
+
+      - name: Run test suite
+        run: npm test

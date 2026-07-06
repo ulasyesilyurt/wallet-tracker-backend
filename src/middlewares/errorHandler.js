@@ -25,7 +25,19 @@ export function errorHandler(error, req, res, next) {
     });
   }
 
-  logger.error({ err: error, path: req.originalUrl }, 'Unhandled request error');
+  if (error?.statusCode === 401 || error?.statusCode === 404) {
+    logger.info(
+      {
+        path: req.originalUrl,
+        statusCode: error.statusCode,
+        code: error.code,
+        message: error.message
+      },
+      'Handled request error'
+    );
+  } else {
+    logger.error({ err: error, path: req.originalUrl }, 'Unhandled request error');
+  }
 
   return res.status(error.statusCode || 500).json({
     error: {

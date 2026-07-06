@@ -1,17 +1,23 @@
 import { HttpError } from '../../utils/httpError.js';
+import { logger } from '../../config/logger.js';
 import { ensureUserExists } from '../wallets/wallets.service.js';
 import { deactivateDeviceToken, upsertDeviceToken } from './deviceTokens.repository.js';
+
+const deviceTokensServiceLogger = logger.child({ module: 'device-tokens-service' });
 
 export async function registerDeviceToken(payload) {
   await ensureUserExists(payload.userId);
   const deviceToken = await upsertDeviceToken(payload);
 
-  console.log('[device-tokens] backend save result', {
-    userId: payload.userId,
-    deviceTokenId: deviceToken.id,
-    platform: deviceToken.platform,
-    isActive: deviceToken.isActive
-  });
+  deviceTokensServiceLogger.info(
+    {
+      userId: payload.userId,
+      deviceTokenId: deviceToken.id,
+      platform: deviceToken.platform,
+      isActive: deviceToken.isActive
+    },
+    'Registered device token'
+  );
 
   return deviceToken;
 }

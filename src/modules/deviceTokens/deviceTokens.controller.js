@@ -1,13 +1,18 @@
+import { logger } from '../../config/logger.js';
 import { registerDeviceToken, unregisterDeviceToken } from './deviceTokens.service.js';
+
+const deviceTokensControllerLogger = logger.child({ module: 'device-tokens-controller' });
 
 export async function addDeviceToken(req, res) {
   const { token, platform } = req.validated.body;
-  console.log('[device-tokens] authenticated registration request received', {
-    authUserId: req.auth.user.id,
-    routeUserId: req.validated.params.userId,
-    platform,
-    tokenPreview: token.slice(0, 12)
-  });
+  deviceTokensControllerLogger.info(
+    {
+      authUserId: req.auth.user.id,
+      routeUserId: req.validated.params.userId,
+      platform
+    },
+    'Authenticated device token registration request received'
+  );
 
   const deviceToken = await registerDeviceToken({
     userId: req.auth.user.id,

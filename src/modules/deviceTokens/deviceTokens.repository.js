@@ -1,4 +1,7 @@
+import { logger } from '../../config/logger.js';
 import { query } from '../../db/query.js';
+
+const deviceTokensRepositoryLogger = logger.child({ module: 'device-tokens-repository' });
 
 function mapDeviceToken(row) {
   return {
@@ -28,12 +31,15 @@ export async function upsertDeviceToken({ userId, fcmToken, platform }) {
     [userId, fcmToken, platform]
   );
 
-  console.log('[device-tokens] upsert result', {
-    userId,
-    platform,
-    deviceTokenId: result.rows[0]?.id,
-    savedForUserId: result.rows[0]?.user_id
-  });
+  deviceTokensRepositoryLogger.info(
+    {
+      userId,
+      platform,
+      deviceTokenId: result.rows[0]?.id,
+      savedForUserId: result.rows[0]?.user_id
+    },
+    'Upserted device token record'
+  );
 
   return mapDeviceToken(result.rows[0]);
 }

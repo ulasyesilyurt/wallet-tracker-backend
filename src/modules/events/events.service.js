@@ -1,9 +1,11 @@
 import { HttpError } from '../../utils/httpError.js';
-import { findWalletByIdOnly } from '../wallets/wallets.repository.js';
+import { findWalletById, findWalletByIdOnly } from '../wallets/wallets.repository.js';
 import { listGlobalActivityByUserId, listWalletEventsByWalletId } from './events.repository.js';
 
-export async function listWalletEvents(walletId) {
-  const wallet = await findWalletByIdOnly(walletId);
+export async function listWalletEvents(walletId, userId = null) {
+  const wallet = userId
+    ? await findWalletById(walletId, userId)
+    : await findWalletByIdOnly(walletId);
 
   if (!wallet) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');

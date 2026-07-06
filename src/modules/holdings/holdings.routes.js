@@ -1,10 +1,11 @@
 import { Router } from 'express';
+import { authenticate } from '../../middlewares/authenticate.js';
 import { validate } from '../../middlewares/validate.js';
 import { getHoldings } from './holdings.controller.js';
 import { walletHoldingsParamsSchema } from './holdings.schemas.js';
 
 const router = Router();
 
-router.get('/wallets/:walletId/holdings', validate(walletHoldingsParamsSchema), getHoldings);
+router.get('/wallets/:walletId/holdings', authenticate, validate(walletHoldingsParamsSchema), getHoldings);
 
 export const holdingsRouter = router;

@@ -1,7 +1,7 @@
 import { HttpError } from '../../utils/httpError.js';
 import { logger } from '../../config/logger.js';
 import { BASE_MAINNET_CHAIN_ID, ETHEREUM_MAINNET_CHAIN_ID } from '../chains/chains.config.js';
-import { findWalletByIdOnly } from '../wallets/wallets.repository.js';
+import { findWalletById, findWalletByIdOnly } from '../wallets/wallets.repository.js';
 import { fetchWalletHoldingsForChain } from './holdings.provider.js';
 import { findWalletChainHoldingsCaches, upsertWalletChainHoldingsCache } from './holdings.repository.js';
 
@@ -662,11 +662,14 @@ async function resolveChainHoldings(wallet, chainId, enabledChains, { requireLiv
 export async function getWalletHoldings(
   walletId,
   {
+    userId = null,
     allowPersistedFallback = true,
     requireLive = false
   } = {}
 ) {
-  const wallet = await findWalletByIdOnly(walletId);
+  const wallet = userId
+    ? await findWalletById(walletId, userId)
+    : await findWalletByIdOnly(walletId);
 
   if (!wallet) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');

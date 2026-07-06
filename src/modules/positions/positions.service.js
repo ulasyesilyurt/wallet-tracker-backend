@@ -1,7 +1,7 @@
 import { HttpError } from '../../utils/httpError.js';
 import { logger } from '../../config/logger.js';
 import { BASE_MAINNET_CHAIN_ID, ETHEREUM_MAINNET_CHAIN_ID } from '../chains/chains.config.js';
-import { findWalletByIdOnly } from '../wallets/wallets.repository.js';
+import { findWalletById, findWalletByIdOnly } from '../wallets/wallets.repository.js';
 import {
   fetchWalletPositionsForChain,
   peekCachedWalletPositionsForChain
@@ -14,8 +14,10 @@ const positionsCache = new Map();
 const inFlightPositionsPromises = new Map();
 const positionsServiceLogger = logger.child({ module: 'positions-service' });
 
-async function findSupportedWallet(walletId) {
-  const wallet = await findWalletByIdOnly(walletId);
+async function findSupportedWallet(walletId, userId = null) {
+  const wallet = userId
+    ? await findWalletById(walletId, userId)
+    : await findWalletByIdOnly(walletId);
 
   if (!wallet) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
@@ -126,8 +128,8 @@ function aggregatePositionsResponse({ wallet, enabledChains, chainResponses, par
   };
 }
 
-export async function getWalletPositions(walletId) {
-  const { wallet, enabledChains, supportedChains } = await findSupportedWallet(walletId);
+export async function getWalletPositions(walletId, { userId = null } = {}) {
+  const { wallet, enabledChains, supportedChains } = await findSupportedWallet(walletId, userId);
   const cacheKey = buildPositionsCacheKey(wallet);
   const cachedPositions = getCachedPositions(cacheKey);
 

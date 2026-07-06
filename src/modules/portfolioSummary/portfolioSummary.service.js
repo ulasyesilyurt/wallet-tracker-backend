@@ -1,6 +1,8 @@
 import { getWalletHoldings } from '../holdings/holdings.service.js';
 import { getCachedWalletPositions, getWalletPositions } from '../positions/positions.service.js';
 import { logger } from '../../config/logger.js';
+import { findWalletById } from '../wallets/wallets.repository.js';
+import { HttpError } from '../../utils/httpError.js';
 
 const portfolioSummaryLogger = logger.child({ module: 'portfolio-summary' });
 const PORTFOLIO_SUMMARY_CACHE_TTL_MS = 10 * 1000;
@@ -108,9 +110,18 @@ export async function getWalletPortfolioSummary(
   walletId,
   {
     includePositions = true,
-    allowPersistedFallback = true
+    allowPersistedFallback = true,
+    userId = null
   } = {}
 ) {
+  if (userId != null) {
+    const wallet = await findWalletById(walletId, userId);
+
+    if (!wallet) {
+      throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
+    }
+  }
+
   const cachedSummary = getCachedPortfolioSummary(walletId, { includePositions, allowPersistedFallback });
 
   if (cachedSummary) {
@@ -122,11 +133,12 @@ export async function getWalletPortfolioSummary(
 
   return getOrCreateInFlightPortfolioSummaryPromise(walletId, { includePositions, allowPersistedFallback }, async () => {
     const holdingsPromise = getWalletHoldings(walletId, {
+      userId,
       allowPersistedFallback,
       requireLive: allowPersistedFallback === false
     });
     const positionsPromise = includePositions
-      ? getWalletPositions(walletId)
+      ? getWalletPositions(walletId, { userId })
       : getCachedWalletPositions(walletId);
     const [holdingsResult, positionsResult] = await Promise.allSettled([holdingsPromise, positionsPromise]);
 

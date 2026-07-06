@@ -24,6 +24,6 @@ const globalActivityQuerySchema = z.object({
 });
 
 router.get('/activity', authenticate, validate(globalActivityQuerySchema), getGlobalActivity);
-router.get('/wallets/:walletId/events', validate(walletEventsParamsSchema), getWalletEvents);
+router.get('/wallets/:walletId/events', authenticate, validate(walletEventsParamsSchema), getWalletEvents);
 
 export const eventsRouter = router;

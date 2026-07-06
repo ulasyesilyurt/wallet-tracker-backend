@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
+    "test": "node --test --test-concurrency=1",
     "migrate": "node src/scripts/runMigrations.js",
     "tracker:ethereum": "node src/scripts/runEthereumTracker.js",
     "seed:portfolio-snapshots": "node src/scripts/seedPortfolioSnapshots.js",
@@ -28,5 +29,8 @@
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
     "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "supertest": "^7.2.2"
   }
 }

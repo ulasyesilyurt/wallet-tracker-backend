@@ -43,8 +43,8 @@ const wallet = {
   label: 'Auth Test Wallet'
 };
 
-const ownerToken = createAccessToken(ownerUser);
-const nonOwnerToken = createAccessToken(nonOwnerUser);
+const ownerToken = await createAccessToken(ownerUser);
+const nonOwnerToken = await createAccessToken(nonOwnerUser);
 
 const persistedHoldingsPayload = {
   walletId: wallet.id,

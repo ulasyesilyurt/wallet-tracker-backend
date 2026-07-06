@@ -11,7 +11,7 @@ export async function authenticate(req, res, next) {
     }
 
     const token = authorizationHeader.slice('Bearer '.length).trim();
-    const payload = verifyAccessToken(token);
+    const payload = await verifyAccessToken(token);
     const user = await findUserById(payload.sub);
 
     if (!user) {

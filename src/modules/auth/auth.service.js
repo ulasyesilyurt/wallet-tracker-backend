@@ -13,10 +13,10 @@ function sanitizeUser(user) {
   };
 }
 
-function buildAuthResponse(user) {
+async function buildAuthResponse(user) {
   return {
     user: sanitizeUser(user),
-    accessToken: createAccessToken(user)
+    accessToken: await createAccessToken(user)
   };
 }
 

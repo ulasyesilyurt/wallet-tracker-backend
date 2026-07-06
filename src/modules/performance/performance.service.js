@@ -9,7 +9,6 @@ import {
 } from './performance.repository.js';
 
 const performanceLogger = logger.child({ module: 'portfolio-performance' });
-const SUPPORTED_CHAIN_ID = 'ethereum-mainnet';
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 function buildUnavailablePerformanceResult({ currentValue, reason = 'LIVE_PORTFOLIO_VALUATION_UNAVAILABLE', isPartial = false, snapshot }) {
@@ -88,9 +87,8 @@ export async function getWalletPerformance(walletId, userId) {
 
 export async function getAggregatedPortfolioPerformance(userId) {
   const wallets = await listWalletsByUserId(userId);
-  const supportedWallets = wallets.filter((wallet) => wallet.chainId === SUPPORTED_CHAIN_ID);
 
-  if (supportedWallets.length === 0) {
+  if (wallets.length === 0) {
     return {
       currentValue: 0,
       value24hAgo: null,
@@ -103,7 +101,7 @@ export async function getAggregatedPortfolioPerformance(userId) {
   }
 
   const summaries = await Promise.all(
-    supportedWallets.map((wallet) => getWalletPortfolioSummary(wallet.id, { allowPersistedFallback: false }))
+    wallets.map((wallet) => getWalletPortfolioSummary(wallet.id, { allowPersistedFallback: false }))
   );
 
   const validCurrentValues = summaries
@@ -116,7 +114,7 @@ export async function getAggregatedPortfolioPerformance(userId) {
 
   const cutoff = new Date(Date.now() - ONE_DAY_MS).toISOString();
   const snapshots = await findLatestSnapshotsAtOrBefore(
-    supportedWallets.map((wallet) => wallet.id),
+    wallets.map((wallet) => wallet.id),
     cutoff
   );
 
@@ -129,7 +127,7 @@ export async function getAggregatedPortfolioPerformance(userId) {
     });
   }
 
-  if (currentValue == null || snapshots.length !== supportedWallets.length) {
+  if (currentValue == null || snapshots.length !== wallets.length) {
     return buildUnavailablePerformanceResult({
       currentValue,
       reason: currentValue == null ? 'LIVE_PORTFOLIO_VALUATION_UNAVAILABLE' : 'INSUFFICIENT_HISTORY',

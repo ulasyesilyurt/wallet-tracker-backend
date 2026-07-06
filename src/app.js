@@ -3,6 +3,7 @@ import express from 'express';
 import helmet from 'helmet';
 import pinoHttp from 'pino-http';
 import { logger } from './config/logger.js';
+import { globalApiRateLimiter } from './middlewares/rateLimit.js';
 import { apiRouter } from './routes/index.js';
 import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
 
@@ -30,6 +31,10 @@ export function createApp() {
       logger
     })
   );
+
+  if (globalApiRateLimiter) {
+    app.use('/api/v1', globalApiRateLimiter);
+  }
 
   app.use('/api/v1', apiRouter);
   app.use(notFoundHandler);

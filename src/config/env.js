@@ -10,6 +10,11 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
   JWT_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(60 * 60 * 24 * 7),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  GLOBAL_API_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
+  GLOBAL_API_RATE_LIMIT_MAX: z.coerce.number().int().min(0).default(300),
+  AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
+  AUTH_LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
+  AUTH_REGISTER_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(5),
   ENABLE_PUSH_NOTIFICATIONS: z.preprocess((value) => {
     if (typeof value === 'boolean') {
       return value;

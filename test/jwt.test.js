@@ -28,6 +28,13 @@ function buildLegacyHs256Token(payload) {
   return `${unsignedToken}.${signature}`;
 }
 
+function buildInvalidToken(token) {
+  const lastCharacter = token.slice(-1);
+  const replacementCharacter = lastCharacter === 'x' ? 'y' : 'x';
+
+  return `${token.slice(0, -1)}${replacementCharacter}`;
+}
+
 async function expectHttpError(promise, expectedCode) {
   await assert.rejects(
     promise,
@@ -73,7 +80,7 @@ describe('JWT verification', () => {
       id: '834a523f-1dd5-4406-b929-5d318e5fa71e',
       email: 'invalid@example.com'
     });
-    const invalidToken = `${validToken.slice(0, -1)}x`;
+    const invalidToken = buildInvalidToken(validToken);
 
     await expectHttpError(verifyAccessToken(invalidToken), 'AUTH_INVALID_TOKEN');
   });

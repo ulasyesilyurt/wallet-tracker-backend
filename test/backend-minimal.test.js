@@ -576,4 +576,36 @@ describe('event usd enrichment and alert filtering', () => {
     assert.equal(response.body.data[0].transactionHash, event.transactionHash);
     assert.equal(response.body.data[0].eventType, event.eventType);
   });
+
+  test('duplicate normalized event insert is idempotent for wallet_events and notification_outbox', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      amount: '0.2',
+      amountWei: '200000000000000000',
+      logIndex: 7
+    });
+
+    const firstInsert = await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+    const secondInsert = await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    const walletEventCountResult = await query(
+      `
+        SELECT COUNT(*)::int AS count
+        FROM wallet_events
+        WHERE wallet_id = $1
+          AND transaction_hash = $2
+      `,
+      [wallet.id, event.transactionHash]
+    );
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+
+    assert.equal(firstInsert.length, 1);
+    assert.equal(secondInsert.length, 0);
+    assert.equal(walletEventCountResult.rows[0].count, 1);
+    assert.equal(outboxCount, 1);
+  });
 });

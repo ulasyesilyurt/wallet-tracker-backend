@@ -1,6 +1,11 @@
 import { pool } from '../../db/pool.js';
 import { query } from '../../db/query.js';
-import { enqueueNotificationOutbox } from '../notifications/notifications.repository.js';
+import { enrichWalletEventUsdValue } from './eventValuation.service.js';
+import {
+  enqueueNotificationOutbox,
+  getWalletAlertSettingsByWalletId
+} from '../notifications/notifications.repository.js';
+import { shouldEnqueueNotificationForWalletEvent } from '../notifications/notificationRules.service.js';
 
 function mapWalletEvent(row) {
   return {
@@ -49,7 +54,7 @@ function mapGlobalActivityEvent(row) {
   };
 }
 
-export async function insertWalletEvents(events, logger = null) {
+export async function insertWalletEvents(events, logger = null, options = {}) {
   if (events.length === 0) {
     logger?.info('No wallet events to insert into database');
     return [];
@@ -58,18 +63,23 @@ export async function insertWalletEvents(events, logger = null) {
   const insertedEvents = [];
 
   for (const event of events) {
+    const enrichedEvent = await enrichWalletEventUsdValue(event, options, logger);
+
     logger?.info({
-      walletId: event.walletId,
-      chainId: event.chainId,
-      transactionHash: event.transactionHash,
-      blockNumber: event.blockNumber,
-      contractAddress: event.rawPayload?.contractAddress ?? null,
-      eventType: event.eventType,
-      fromAddress: event.fromAddress,
-      toAddress: event.toAddress,
-      amount: event.amount,
-      amountWei: event.amountWei,
-      logIndex: event.logIndex
+      walletId: enrichedEvent.walletId,
+      chainId: enrichedEvent.chainId,
+      transactionHash: enrichedEvent.transactionHash,
+      blockNumber: enrichedEvent.blockNumber,
+      contractAddress: enrichedEvent.rawPayload?.contractAddress ?? null,
+      eventType: enrichedEvent.eventType,
+      fromAddress: enrichedEvent.fromAddress,
+      toAddress: enrichedEvent.toAddress,
+      amount: enrichedEvent.amount,
+      amountWei: enrichedEvent.amountWei,
+      logIndex: enrichedEvent.logIndex,
+      usdValue: enrichedEvent.usdValue,
+      usdValueStatus: enrichedEvent.usdValueStatus,
+      usdValueSource: enrichedEvent.usdValueSource
     }, 'About to insert wallet event into database');
 
     const client = await pool.connect();
@@ -100,51 +110,82 @@ export async function insertWalletEvents(events, logger = null) {
             from_address,
             to_address,
             amount_wei,
-            direction
+            direction,
+            usd_value,
+            usd_value_status,
+            usd_value_source,
+            usd_value_calculated_at
           )
           VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
           )
           ON CONFLICT DO NOTHING
           RETURNING id, wallet_id, transaction_hash, event_type, asset_type, occurred_at
         `,
         [
-          event.walletId,
-          event.chainId,
-          event.transactionHash,
-          event.eventType,
-          event.assetType,
-          event.assetSymbol,
-          event.assetName,
-          event.amount,
-          event.tokenContractAddress,
-          event.nftContractAddress,
-          event.nftTokenId,
-          event.marketplace,
-          event.occurredAt,
-          event.explorerUrl,
-          JSON.stringify(event.rawPayload),
-          event.blockNumber,
-          event.logIndex,
-          event.fromAddress,
-          event.toAddress,
-          event.amountWei,
-          event.direction
+          enrichedEvent.walletId,
+          enrichedEvent.chainId,
+          enrichedEvent.transactionHash,
+          enrichedEvent.eventType,
+          enrichedEvent.assetType,
+          enrichedEvent.assetSymbol,
+          enrichedEvent.assetName,
+          enrichedEvent.amount,
+          enrichedEvent.tokenContractAddress,
+          enrichedEvent.nftContractAddress,
+          enrichedEvent.nftTokenId,
+          enrichedEvent.marketplace,
+          enrichedEvent.occurredAt,
+          enrichedEvent.explorerUrl,
+          JSON.stringify(enrichedEvent.rawPayload),
+          enrichedEvent.blockNumber,
+          enrichedEvent.logIndex,
+          enrichedEvent.fromAddress,
+          enrichedEvent.toAddress,
+          enrichedEvent.amountWei,
+          enrichedEvent.direction,
+          enrichedEvent.usdValue,
+          enrichedEvent.usdValueStatus,
+          enrichedEvent.usdValueSource,
+          enrichedEvent.usdValueCalculatedAt
         ]
       );
 
       if (result.rows[0]) {
-        const outboxJob = await enqueueNotificationOutbox(client, result.rows[0].id);
+        const alertSettings = await getWalletAlertSettingsByWalletId(client, enrichedEvent.walletId);
+        const notificationDecision = shouldEnqueueNotificationForWalletEvent({
+          event: enrichedEvent,
+          alertSettings
+        });
 
-        logger?.info(
-          {
-            walletEventId: result.rows[0].id,
-            walletId: event.walletId,
-            transactionHash: event.transactionHash,
-            outboxJobId: outboxJob?.id ?? null
-          },
-          'Notification outbox job enqueued for inserted wallet event'
-        );
+        if (notificationDecision.shouldEnqueue) {
+          const outboxJob = await enqueueNotificationOutbox(client, result.rows[0].id);
+
+          logger?.info(
+            {
+              walletEventId: result.rows[0].id,
+              walletId: enrichedEvent.walletId,
+              transactionHash: enrichedEvent.transactionHash,
+              outboxJobId: outboxJob?.id ?? null,
+              minimumAlertUsd: notificationDecision.minimumAlertUsd,
+              usdValue: enrichedEvent.usdValue
+            },
+            'Notification outbox job enqueued for inserted wallet event'
+          );
+        } else {
+          logger?.info(
+            {
+              walletEventId: result.rows[0].id,
+              walletId: enrichedEvent.walletId,
+              transactionHash: enrichedEvent.transactionHash,
+              usdValue: enrichedEvent.usdValue,
+              usdValueStatus: enrichedEvent.usdValueStatus,
+              minimumAlertUsd: notificationDecision.minimumAlertUsd,
+              notificationSkipReason: notificationDecision.reason
+            },
+            'Notification outbox job skipped for inserted wallet event'
+          );
+        }
       }
 
       await client.query('COMMIT');
@@ -156,24 +197,24 @@ export async function insertWalletEvents(events, logger = null) {
     }
 
     logger?.info({
-      transactionHash: event.transactionHash,
-      blockNumber: event.blockNumber,
-      contractAddress: event.rawPayload?.contractAddress ?? null,
-      eventType: event.eventType,
+      transactionHash: enrichedEvent.transactionHash,
+      blockNumber: enrichedEvent.blockNumber,
+      contractAddress: enrichedEvent.rawPayload?.contractAddress ?? null,
+      eventType: enrichedEvent.eventType,
       rowCount: result.rowCount
     }, 'Wallet event insert query executed');
 
     logger?.info({
-      transactionHash: event.lifecycle?.transactionHash ?? event.transactionHash,
-      blockNumber: event.lifecycle?.blockNumber ?? event.blockNumber,
-      contractAddress: event.lifecycle?.contractAddress ?? event.rawPayload?.contractAddress ?? null,
-      fromAddress: event.lifecycle?.fromAddress ?? event.fromAddress,
-      toAddress: event.lifecycle?.toAddress ?? event.toAddress,
-      eventType: event.lifecycle?.eventType ?? event.eventType,
-      fromAddressMatched: event.lifecycle?.fromAddressMatched ?? false,
-      toAddressMatched: event.lifecycle?.toAddressMatched ?? false,
-      matchedWalletIds: event.lifecycle?.matchedWalletIds ?? [event.walletId],
-      matched: event.lifecycle?.matched ?? true,
+      transactionHash: enrichedEvent.lifecycle?.transactionHash ?? enrichedEvent.transactionHash,
+      blockNumber: enrichedEvent.lifecycle?.blockNumber ?? enrichedEvent.blockNumber,
+      contractAddress: enrichedEvent.lifecycle?.contractAddress ?? enrichedEvent.rawPayload?.contractAddress ?? null,
+      fromAddress: enrichedEvent.lifecycle?.fromAddress ?? enrichedEvent.fromAddress,
+      toAddress: enrichedEvent.lifecycle?.toAddress ?? enrichedEvent.toAddress,
+      eventType: enrichedEvent.lifecycle?.eventType ?? enrichedEvent.eventType,
+      fromAddressMatched: enrichedEvent.lifecycle?.fromAddressMatched ?? false,
+      toAddressMatched: enrichedEvent.lifecycle?.toAddressMatched ?? false,
+      matchedWalletIds: enrichedEvent.lifecycle?.matchedWalletIds ?? [enrichedEvent.walletId],
+      matched: enrichedEvent.lifecycle?.matched ?? true,
       outcome: result.rows[0] ? 'inserted' : 'rejected',
       rejectionReason: result.rows[0] ? null : 'insert_conflict',
       insertQueryRan: true
@@ -182,44 +223,48 @@ export async function insertWalletEvents(events, logger = null) {
     if (result.rows[0]) {
       const insertedEvent = {
         id: result.rows[0].id,
-        walletId: event.walletId,
-        chainId: event.chainId,
-        transactionHash: event.transactionHash,
-        eventType: event.eventType,
-        assetType: event.assetType,
-        assetSymbol: event.assetSymbol,
-        assetName: event.assetName,
-        amount: event.amount,
-        tokenContractAddress: event.tokenContractAddress,
-        nftContractAddress: event.nftContractAddress,
-        nftTokenId: event.nftTokenId,
-        marketplace: event.marketplace,
-        occurredAt: event.occurredAt,
-        explorerUrl: event.explorerUrl,
-        rawPayload: event.rawPayload,
-        blockNumber: event.blockNumber,
-        logIndex: event.logIndex,
-        fromAddress: event.fromAddress,
-        toAddress: event.toAddress,
-        amountWei: event.amountWei,
-        direction: event.direction
+        walletId: enrichedEvent.walletId,
+        chainId: enrichedEvent.chainId,
+        transactionHash: enrichedEvent.transactionHash,
+        eventType: enrichedEvent.eventType,
+        assetType: enrichedEvent.assetType,
+        assetSymbol: enrichedEvent.assetSymbol,
+        assetName: enrichedEvent.assetName,
+        amount: enrichedEvent.amount,
+        tokenContractAddress: enrichedEvent.tokenContractAddress,
+        nftContractAddress: enrichedEvent.nftContractAddress,
+        nftTokenId: enrichedEvent.nftTokenId,
+        marketplace: enrichedEvent.marketplace,
+        occurredAt: enrichedEvent.occurredAt,
+        explorerUrl: enrichedEvent.explorerUrl,
+        rawPayload: enrichedEvent.rawPayload,
+        blockNumber: enrichedEvent.blockNumber,
+        logIndex: enrichedEvent.logIndex,
+        fromAddress: enrichedEvent.fromAddress,
+        toAddress: enrichedEvent.toAddress,
+        amountWei: enrichedEvent.amountWei,
+        direction: enrichedEvent.direction,
+        usdValue: enrichedEvent.usdValue,
+        usdValueStatus: enrichedEvent.usdValueStatus,
+        usdValueSource: enrichedEvent.usdValueSource,
+        usdValueCalculatedAt: enrichedEvent.usdValueCalculatedAt
       };
 
       insertedEvents.push(insertedEvent);
       logger?.info({
         insertedEvent: result.rows[0],
-        transactionHash: event.transactionHash,
-        blockNumber: event.blockNumber,
-        contractAddress: event.rawPayload?.contractAddress ?? null,
-        eventType: event.eventType,
+        transactionHash: enrichedEvent.transactionHash,
+        blockNumber: enrichedEvent.blockNumber,
+        contractAddress: enrichedEvent.rawPayload?.contractAddress ?? null,
+        eventType: enrichedEvent.eventType,
         insertOutcome: 'inserted'
       }, 'Wallet event inserted successfully');
     } else {
       logger?.info({
-        transactionHash: event.transactionHash,
-        blockNumber: event.blockNumber,
-        contractAddress: event.rawPayload?.contractAddress ?? null,
-        eventType: event.eventType,
+        transactionHash: enrichedEvent.transactionHash,
+        blockNumber: enrichedEvent.blockNumber,
+        contractAddress: enrichedEvent.rawPayload?.contractAddress ?? null,
+        eventType: enrichedEvent.eventType,
         insertOutcome: 'rejected_conflict'
       }, 'Wallet event insert produced no row, likely due to conflict');
     }

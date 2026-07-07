@@ -13,6 +13,7 @@ process.env.ENABLE_ETHEREUM_TRACKER = 'false';
 process.env.ENABLE_PORTFOLIO_SNAPSHOT_JOB = 'false';
 process.env.GLOBAL_API_RATE_LIMIT_MAX = '1000';
 process.env.ZERION_API_KEY = '';
+process.env.DEFAULT_WALLET_ALERT_MINIMUM_USD = '100';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,6 +25,7 @@ const { createApp } = await import('../src/app.js');
 const { createAccessToken } = await import('../src/utils/jwt.js');
 const { query } = await import('../src/db/query.js');
 const { pool } = await import('../src/db/pool.js');
+const { insertWalletEvents } = await import('../src/modules/events/events.repository.js');
 
 const app = createApp();
 const request = supertest(app);
@@ -139,12 +141,86 @@ async function seedAuthorizationFixtures() {
 }
 
 async function cleanupAuthorizationFixtures() {
+  await query('DELETE FROM wallet_alert_settings WHERE wallet_id = $1', [wallet.id]);
   await query('DELETE FROM wallet_chain_holdings_cache WHERE wallet_id = $1', [wallet.id]);
   await query('DELETE FROM wallet_chains WHERE wallet_id = $1', [wallet.id]);
   await query('DELETE FROM wallet_events WHERE wallet_id = $1', [wallet.id]);
   await query('DELETE FROM wallet_track_preferences WHERE wallet_id = $1', [wallet.id]);
   await query('DELETE FROM tracked_wallets WHERE id = $1', [wallet.id]);
   await query('DELETE FROM app_users WHERE id = ANY($1::uuid[])', [[ownerUser.id, nonOwnerUser.id]]);
+}
+
+async function clearWalletEventArtifacts() {
+  await query('DELETE FROM wallet_alert_settings WHERE wallet_id = $1', [wallet.id]);
+  await query('DELETE FROM wallet_events WHERE wallet_id = $1', [wallet.id]);
+}
+
+function buildTestWalletEvent(overrides = {}) {
+  const transactionHash = overrides.transactionHash ?? `0x${randomUUID().replaceAll('-', '').padEnd(64, '0').slice(0, 64)}`;
+  const blockNumber = overrides.blockNumber ?? Math.floor(Date.now() / 1000);
+
+  return {
+    walletId: wallet.id,
+    chainId: overrides.chainId ?? wallet.chainId,
+    transactionHash,
+    eventType: overrides.eventType ?? 'native_transfer',
+    assetType: overrides.assetType ?? 'coin',
+    assetSymbol: overrides.assetSymbol ?? 'ETH',
+    assetName: overrides.assetName ?? 'Ethereum',
+    amount: overrides.amount ?? '1',
+    tokenContractAddress: overrides.tokenContractAddress ?? null,
+    nftContractAddress: overrides.nftContractAddress ?? null,
+    nftTokenId: overrides.nftTokenId ?? null,
+    marketplace: overrides.marketplace ?? null,
+    occurredAt: overrides.occurredAt ?? new Date().toISOString(),
+    explorerUrl: overrides.explorerUrl ?? `https://etherscan.io/tx/${transactionHash}`,
+    rawPayload: overrides.rawPayload ?? { source: 'test' },
+    blockNumber,
+    logIndex: overrides.logIndex ?? 0,
+    fromAddress: overrides.fromAddress ?? '0x2222222222222222222222222222222222222222',
+    toAddress: overrides.toAddress ?? wallet.address.toLowerCase(),
+    amountWei: overrides.amountWei ?? '1000000000000000000',
+    direction: overrides.direction ?? 'incoming'
+  };
+}
+
+async function getWalletEventRowByTransactionHash(transactionHash) {
+  const result = await query(
+    `
+      SELECT
+        id,
+        wallet_id,
+        transaction_hash,
+        event_type,
+        asset_type,
+        amount,
+        usd_value,
+        usd_value_status,
+        usd_value_source,
+        usd_value_calculated_at
+      FROM wallet_events
+      WHERE wallet_id = $1 AND transaction_hash = $2
+      LIMIT 1
+    `,
+    [wallet.id, transactionHash]
+  );
+
+  return result.rows[0] ?? null;
+}
+
+async function countNotificationOutboxRowsForTransaction(transactionHash) {
+  const result = await query(
+    `
+      SELECT COUNT(*)::int AS count
+      FROM notification_outbox no
+      INNER JOIN wallet_events we ON we.id = no.wallet_event_id
+      WHERE we.wallet_id = $1
+        AND we.transaction_hash = $2
+    `,
+    [wallet.id, transactionHash]
+  );
+
+  return result.rows[0]?.count ?? 0;
 }
 
 function runMigrationScript() {
@@ -285,5 +361,196 @@ describe('migration runner', () => {
       await query(`DROP TABLE IF EXISTS ${failingTableName}`);
       await query('DELETE FROM schema_migrations WHERE filename = $1', [filename]);
     }
+  });
+});
+
+describe('event usd enrichment and alert filtering', () => {
+  test('native ETH above threshold inserts wallet event and creates notification outbox', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      amount: '0.2',
+      amountWei: '200000000000000000'
+    });
+
+    await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    const storedEvent = await getWalletEventRowByTransactionHash(event.transactionHash);
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+
+    assert.ok(storedEvent);
+    assert.equal(Number(storedEvent.usd_value), 600);
+    assert.equal(storedEvent.usd_value_status, 'priced_native_eth');
+    assert.equal(storedEvent.usd_value_source, 'eth_usd');
+    assert.ok(storedEvent.usd_value_calculated_at);
+    assert.equal(outboxCount, 1);
+  });
+
+  test('native ETH below threshold inserts wallet event but does not create notification outbox', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      amount: '0.01',
+      amountWei: '10000000000000000'
+    });
+
+    await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    const storedEvent = await getWalletEventRowByTransactionHash(event.transactionHash);
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+
+    assert.ok(storedEvent);
+    assert.equal(Number(storedEvent.usd_value), 30);
+    assert.equal(storedEvent.usd_value_status, 'priced_native_eth');
+    assert.equal(outboxCount, 0);
+  });
+
+  test('canonical stablecoin above threshold creates notification outbox', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      eventType: 'token_transfer',
+      assetType: 'token',
+      assetSymbol: 'USDC',
+      assetName: 'USD Coin',
+      amount: '150',
+      amountWei: null,
+      tokenContractAddress: '0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+    });
+
+    await insertWalletEvents([event]);
+
+    const storedEvent = await getWalletEventRowByTransactionHash(event.transactionHash);
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+
+    assert.ok(storedEvent);
+    assert.equal(Number(storedEvent.usd_value), 150);
+    assert.equal(storedEvent.usd_value_status, 'priced_canonical_stablecoin');
+    assert.equal(storedEvent.usd_value_source, 'canonical_stablecoin_parity');
+    assert.equal(outboxCount, 1);
+  });
+
+  test('unknown token inserts wallet event but does not create notification outbox', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      eventType: 'token_transfer',
+      assetType: 'token',
+      assetSymbol: 'MYST',
+      assetName: 'Mystery Token',
+      amount: '9999',
+      amountWei: null,
+      tokenContractAddress: '0x9999999999999999999999999999999999999999'
+    });
+
+    await insertWalletEvents([event]);
+
+    const storedEvent = await getWalletEventRowByTransactionHash(event.transactionHash);
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+
+    assert.ok(storedEvent);
+    assert.equal(storedEvent.usd_value, null);
+    assert.equal(storedEvent.usd_value_status, 'unknown_token');
+    assert.equal(outboxCount, 0);
+  });
+
+  test('NFT event keeps usd value null and respects notify_nft_transfers', async () => {
+    await clearWalletEventArtifacts();
+    await query(
+      `
+        INSERT INTO wallet_alert_settings (
+          wallet_id,
+          notify_nft_transfers,
+          notifications_enabled
+        )
+        VALUES ($1, FALSE, TRUE)
+      `,
+      [wallet.id]
+    );
+
+    const event = buildTestWalletEvent({
+      eventType: 'nft_transfer',
+      assetType: 'nft',
+      assetSymbol: 'NFT',
+      assetName: 'Test NFT',
+      amount: '1',
+      amountWei: null,
+      tokenContractAddress: null,
+      nftContractAddress: '0x4444444444444444444444444444444444444444',
+      nftTokenId: '123'
+    });
+
+    await insertWalletEvents([event]);
+
+    const storedEvent = await getWalletEventRowByTransactionHash(event.transactionHash);
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+
+    assert.ok(storedEvent);
+    assert.equal(storedEvent.usd_value, null);
+    assert.equal(storedEvent.usd_value_status, 'unsupported_nft');
+    assert.equal(outboxCount, 0);
+  });
+
+  test('notifications_enabled false prevents notification outbox creation', async () => {
+    await clearWalletEventArtifacts();
+    await query(
+      `
+        INSERT INTO wallet_alert_settings (
+          wallet_id,
+          notifications_enabled,
+          minimum_alert_usd
+        )
+        VALUES ($1, FALSE, 1)
+      `,
+      [wallet.id]
+    );
+
+    const event = buildTestWalletEvent({
+      amount: '1',
+      amountWei: '1000000000000000000'
+    });
+
+    await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+    assert.equal(outboxCount, 0);
+  });
+
+  test('missing wallet_alert_settings uses defaults', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      amount: '0.04',
+      amountWei: '40000000000000000'
+    });
+
+    await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+    assert.equal(outboxCount, 1);
+  });
+
+  test('wallet events response shape still works after valued event insertion', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      amount: '0.2',
+      amountWei: '200000000000000000'
+    });
+
+    await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    const response = await request
+      .get(`/api/v1/wallets/${wallet.id}/events`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.ok(Array.isArray(response.body.data));
+    assert.equal(response.body.data[0].transactionHash, event.transactionHash);
+    assert.equal(response.body.data[0].eventType, event.eventType);
   });
 });

@@ -914,6 +914,11 @@ async function fetchNativeEthUsdPrice(apiKey, chainId) {
   return null;
 }
 
+export async function fetchChainEthUsdPrice(chainId) {
+  const alchemyApiKey = extractAlchemyApiKey(chainId);
+  return fetchNativeEthUsdPrice(alchemyApiKey, chainId);
+}
+
 async function fetchErc20PricesByAddress(apiKey, chainId, holdings) {
   const addressHoldings = holdings.filter((holding) => typeof holding.tokenAddress === 'string');
   const chainConfig = getChainConfigById(chainId);

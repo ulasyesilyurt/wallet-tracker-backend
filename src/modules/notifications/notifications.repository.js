@@ -1,6 +1,14 @@
 import { pool } from '../../db/pool.js';
 import { query } from '../../db/query.js';
 
+function runDbQuery(dbClient, text, params) {
+  if (dbClient?.query) {
+    return dbClient.query(text, params);
+  }
+
+  return query(text, params);
+}
+
 export async function getWalletNotificationTarget(walletId) {
   const result = await query(
     `
@@ -103,6 +111,42 @@ export async function enqueueNotificationOutbox(client, walletEventId) {
       updatedAt: result.rows[0].updated_at
     }
     : null;
+}
+
+function mapWalletAlertSettingsRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    walletId: row.wallet_id,
+    minimumAlertUsd: row.minimum_alert_usd != null ? Number(row.minimum_alert_usd) : null,
+    notificationsEnabled: row.notifications_enabled,
+    notifyNftTransfers: row.notify_nft_transfers,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export async function getWalletAlertSettingsByWalletId(dbClient, walletId) {
+  const result = await runDbQuery(
+    dbClient,
+    `
+      SELECT
+        wallet_id,
+        minimum_alert_usd,
+        notifications_enabled,
+        notify_nft_transfers,
+        created_at,
+        updated_at
+      FROM wallet_alert_settings
+      WHERE wallet_id = $1
+      LIMIT 1
+    `,
+    [walletId]
+  );
+
+  return mapWalletAlertSettingsRow(result.rows[0]);
 }
 
 function mapNotificationOutboxRow(row) {

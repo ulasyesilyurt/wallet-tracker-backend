@@ -5,8 +5,10 @@ import {
   createWalletWithPreferences,
   deleteWalletById,
   findWalletById,
+  findWalletAlertSettingsByWalletId,
   findWalletByUserIdAndAddress,
   listWalletsByUserId,
+  upsertWalletAlertSettings,
   updateWalletById
 } from './wallets.repository.js';
 import {
@@ -14,8 +16,18 @@ import {
   syncAlchemyWebhookAddressOnWalletDelete,
   syncAlchemyWebhookAddressOnWalletUpdate
 } from '../webhooks/alchemyAddressSync.service.js';
+import { applyWalletAlertSettingsDefaults } from '../notifications/notificationRules.service.js';
 
 const walletsServiceLogger = logger.child({ module: 'wallets-service' });
+
+function toPublicWalletAlertSettings(settings) {
+  return {
+    walletId: settings.walletId,
+    minimumAlertUsd: settings.minimumAlertUsd,
+    notificationsEnabled: settings.notificationsEnabled,
+    notifyNftTransfers: settings.notifyNftTransfers
+  };
+}
 
 export async function ensureUserExists(userId) {
   const result = await query(
@@ -162,4 +174,30 @@ export async function updateWallet(walletId, userId, payload) {
   }
 
   return updatedWallet;
+}
+
+export async function getWalletAlertSettings(walletId, userId) {
+  const wallet = await findWalletById(walletId, userId);
+
+  if (!wallet) {
+    throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
+  }
+
+  const alertSettings = await findWalletAlertSettingsByWalletId(walletId);
+
+  return toPublicWalletAlertSettings(applyWalletAlertSettingsDefaults({
+    walletId,
+    ...alertSettings
+  }));
+}
+
+export async function replaceWalletAlertSettings(walletId, userId, payload) {
+  const wallet = await findWalletById(walletId, userId);
+
+  if (!wallet) {
+    throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
+  }
+
+  const updatedSettings = await upsertWalletAlertSettings(walletId, payload);
+  return toPublicWalletAlertSettings(updatedSettings);
 }

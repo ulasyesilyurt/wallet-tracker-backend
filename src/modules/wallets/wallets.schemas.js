@@ -60,6 +60,26 @@ export const deleteWalletSchema = z.object({
   query: z.object({}).optional()
 });
 
+export const walletAlertSettingsParamsSchema = z.object({
+  params: z.object({
+    walletId: uuidSchema
+  }),
+  body: z.object({}).optional(),
+  query: z.object({}).optional()
+});
+
+export const putWalletAlertSettingsSchema = z.object({
+  params: z.object({
+    walletId: uuidSchema
+  }),
+  body: z.object({
+    minimumAlertUsd: z.number().min(0).nullable(),
+    notificationsEnabled: z.boolean(),
+    notifyNftTransfers: z.boolean()
+  }),
+  query: z.object({}).optional()
+});
+
 export const updateWalletSchema = z.object({
   params: z.object({
     userId: uuidSchema,

@@ -312,6 +312,134 @@ describe('wallet data authorization', () => {
   }
 });
 
+describe('wallet alert settings api', () => {
+  test('GET returns 401 without a token', async () => {
+    await query('DELETE FROM wallet_alert_settings WHERE wallet_id = $1', [wallet.id]);
+
+    const response = await request.get(`/api/v1/wallets/${wallet.id}/alert-settings`);
+
+    assert.equal(response.status, 401);
+    assert.equal(response.body.error.code, 'AUTH_MISSING_TOKEN');
+  });
+
+  test('GET returns defaults for the wallet owner when no row exists', async () => {
+    await query('DELETE FROM wallet_alert_settings WHERE wallet_id = $1', [wallet.id]);
+
+    const response = await request
+      .get(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.data, {
+      walletId: wallet.id,
+      minimumAlertUsd: 100,
+      notificationsEnabled: true,
+      notifyNftTransfers: true
+    });
+  });
+
+  test('GET returns 404 for a different authenticated user', async () => {
+    const response = await request
+      .get(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${nonOwnerToken}`);
+
+    assert.equal(response.status, 404);
+    assert.equal(response.body.error.code, 'WALLET_NOT_FOUND');
+  });
+
+  test('PUT returns 401 without a token', async () => {
+    const response = await request
+      .put(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .send({
+        minimumAlertUsd: 25,
+        notificationsEnabled: true,
+        notifyNftTransfers: false
+      });
+
+    assert.equal(response.status, 401);
+    assert.equal(response.body.error.code, 'AUTH_MISSING_TOKEN');
+  });
+
+  test('PUT upserts alert settings for the wallet owner', async () => {
+    await query('DELETE FROM wallet_alert_settings WHERE wallet_id = $1', [wallet.id]);
+
+    const putResponse = await request
+      .put(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        minimumAlertUsd: 250,
+        notificationsEnabled: true,
+        notifyNftTransfers: false
+      });
+
+    assert.equal(putResponse.status, 200);
+    assert.deepEqual(putResponse.body.data, {
+      walletId: wallet.id,
+      minimumAlertUsd: 250,
+      notificationsEnabled: true,
+      notifyNftTransfers: false
+    });
+
+    const getResponse = await request
+      .get(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(getResponse.status, 200);
+    assert.deepEqual(getResponse.body.data, {
+      walletId: wallet.id,
+      minimumAlertUsd: 250,
+      notificationsEnabled: true,
+      notifyNftTransfers: false
+    });
+  });
+
+  test('PUT accepts null minimumAlertUsd and persists it', async () => {
+    const response = await request
+      .put(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        minimumAlertUsd: null,
+        notificationsEnabled: false,
+        notifyNftTransfers: true
+      });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.data, {
+      walletId: wallet.id,
+      minimumAlertUsd: null,
+      notificationsEnabled: false,
+      notifyNftTransfers: true
+    });
+  });
+
+  test('PUT returns 404 for a different authenticated user', async () => {
+    const response = await request
+      .put(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${nonOwnerToken}`)
+      .send({
+        minimumAlertUsd: 10,
+        notificationsEnabled: true,
+        notifyNftTransfers: true
+      });
+
+    assert.equal(response.status, 404);
+    assert.equal(response.body.error.code, 'WALLET_NOT_FOUND');
+  });
+
+  test('PUT rejects invalid minimumAlertUsd', async () => {
+    const response = await request
+      .put(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        minimumAlertUsd: -1,
+        notificationsEnabled: true,
+        notifyNftTransfers: true
+      });
+
+    assert.equal(response.status, 400);
+  });
+});
+
 describe('migration runner', () => {
   test('skips already applied migrations on the second run', async () => {
     const countBefore = await query('SELECT COUNT(*)::int AS count FROM schema_migrations');

@@ -56,6 +56,21 @@ function mapWallet(row, enabledChainsOverride = null) {
   };
 }
 
+function mapWalletAlertSettings(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    walletId: row.wallet_id,
+    minimumAlertUsd: row.minimum_alert_usd != null ? Number(row.minimum_alert_usd) : null,
+    notificationsEnabled: row.notifications_enabled,
+    notifyNftTransfers: row.notify_nft_transfers,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 export async function listWalletChains(walletId) {
   const result = await query(
     `
@@ -69,6 +84,62 @@ export async function listWalletChains(walletId) {
   );
 
   return result.rows.map((row) => row.chain_id).filter(Boolean);
+}
+
+export async function findWalletAlertSettingsByWalletId(walletId) {
+  const result = await query(
+    `
+      SELECT
+        wallet_id,
+        minimum_alert_usd,
+        notifications_enabled,
+        notify_nft_transfers,
+        created_at,
+        updated_at
+      FROM wallet_alert_settings
+      WHERE wallet_id = $1
+      LIMIT 1
+    `,
+    [walletId]
+  );
+
+  return mapWalletAlertSettings(result.rows[0]);
+}
+
+export async function upsertWalletAlertSettings(walletId, {
+  minimumAlertUsd,
+  notificationsEnabled,
+  notifyNftTransfers
+}) {
+  const result = await query(
+    `
+      INSERT INTO wallet_alert_settings (
+        wallet_id,
+        minimum_alert_usd,
+        notifications_enabled,
+        notify_nft_transfers,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, NOW(), NOW())
+      ON CONFLICT (wallet_id)
+      DO UPDATE SET
+        minimum_alert_usd = EXCLUDED.minimum_alert_usd,
+        notifications_enabled = EXCLUDED.notifications_enabled,
+        notify_nft_transfers = EXCLUDED.notify_nft_transfers,
+        updated_at = NOW()
+      RETURNING
+        wallet_id,
+        minimum_alert_usd,
+        notifications_enabled,
+        notify_nft_transfers,
+        created_at,
+        updated_at
+    `,
+    [walletId, minimumAlertUsd, notificationsEnabled, notifyNftTransfers]
+  );
+
+  return mapWalletAlertSettings(result.rows[0]);
 }
 
 export async function listWalletChainsForWalletIds(walletIds) {

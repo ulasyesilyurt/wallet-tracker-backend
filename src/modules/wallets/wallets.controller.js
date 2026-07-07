@@ -1,4 +1,11 @@
-import { createWallet, listWallets, removeWallet, updateWallet } from './wallets.service.js';
+import {
+  createWallet,
+  getWalletAlertSettings,
+  listWallets,
+  removeWallet,
+  replaceWalletAlertSettings,
+  updateWallet
+} from './wallets.service.js';
 
 export async function addWallet(req, res) {
   const wallet = await createWallet({
@@ -37,5 +44,23 @@ export async function patchWallet(req, res) {
 
   res.status(200).json({
     data: wallet
+  });
+}
+
+export async function getWalletAlertSettingsController(req, res) {
+  const { walletId } = req.validated.params;
+  const alertSettings = await getWalletAlertSettings(walletId, req.auth.user.id);
+
+  res.status(200).json({
+    data: alertSettings
+  });
+}
+
+export async function putWalletAlertSettingsController(req, res) {
+  const { walletId } = req.validated.params;
+  const alertSettings = await replaceWalletAlertSettings(walletId, req.auth.user.id, req.validated.body);
+
+  res.status(200).json({
+    data: alertSettings
   });
 }

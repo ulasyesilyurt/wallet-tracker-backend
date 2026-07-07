@@ -454,6 +454,29 @@ describe('event usd enrichment and alert filtering', () => {
     assert.equal(outboxCount, 0);
   });
 
+  test('native ETH pricing failure still inserts wallet event without notification outbox', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      amount: '1',
+      amountWei: '1000000000000000000'
+    });
+
+    await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => {
+        throw new Error('forced pricing failure');
+      }
+    });
+
+    const storedEvent = await getWalletEventRowByTransactionHash(event.transactionHash);
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+
+    assert.ok(storedEvent);
+    assert.equal(storedEvent.usd_value, null);
+    assert.equal(storedEvent.usd_value_status, 'unpriced');
+    assert.equal(storedEvent.usd_value_source, null);
+    assert.equal(outboxCount, 0);
+  });
+
   test('NFT event keeps usd value null and respects notify_nft_transfers', async () => {
     await clearWalletEventArtifacts();
     await query(

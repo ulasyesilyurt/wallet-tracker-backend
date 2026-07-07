@@ -19,6 +19,10 @@ function roundUsdValue(value) {
 }
 
 function multiplyAmountByUsd(amount, usdPrice) {
+  if (amount == null || usdPrice == null) {
+    return null;
+  }
+
   const numericAmount = Number(amount);
   const numericPrice = Number(usdPrice);
 
@@ -54,6 +58,8 @@ export async function enrichWalletEventUsdValue(
   } = {},
   log = eventValuationLogger
 ) {
+  const valuationLogger = log ?? eventValuationLogger;
+
   if (isNftLikeEvent(event)) {
     return {
       ...event,
@@ -65,7 +71,7 @@ export async function enrichWalletEventUsdValue(
 
   if (event.eventType === 'native_transfer' || event.assetType === 'coin') {
     const ethUsdPrice = await getEthUsdPrice(event.chainId).catch((error) => {
-      log.warn(
+      valuationLogger.warn(
         {
           err: error,
           chainId: event.chainId,
@@ -112,7 +118,7 @@ export async function enrichWalletEventUsdValue(
 
   if (canonicalWethContracts.has(normalizedTokenAddress)) {
     const ethUsdPrice = await getEthUsdPrice(event.chainId).catch((error) => {
-      log.warn(
+      valuationLogger.warn(
         {
           err: error,
           chainId: event.chainId,

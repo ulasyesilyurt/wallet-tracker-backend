@@ -26,6 +26,7 @@ const { createAccessToken } = await import('../src/utils/jwt.js');
 const { query } = await import('../src/db/query.js');
 const { pool } = await import('../src/db/pool.js');
 const { insertWalletEvents } = await import('../src/modules/events/events.repository.js');
+const { getWalletEventNotificationContext } = await import('../src/modules/notifications/notifications.repository.js');
 
 const app = createApp();
 const request = supertest(app);
@@ -735,5 +736,44 @@ describe('event usd enrichment and alert filtering', () => {
     assert.equal(secondInsert.length, 0);
     assert.equal(walletEventCountResult.rows[0].count, 1);
     assert.equal(outboxCount, 1);
+  });
+
+  test('notification context loads persisted USD valuation and NFT fields', async () => {
+    await clearWalletEventArtifacts();
+    const stablecoinEvent = buildTestWalletEvent({
+      eventType: 'token_transfer',
+      assetType: 'token',
+      assetSymbol: 'USDC',
+      assetName: 'USD Coin',
+      amount: '150',
+      amountWei: null,
+      tokenContractAddress: '0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+    });
+    const nftEvent = buildTestWalletEvent({
+      eventType: 'nft_transfer',
+      assetType: 'nft',
+      assetSymbol: 'TEST',
+      assetName: 'Test Collection',
+      amount: '1',
+      amountWei: null,
+      tokenContractAddress: null,
+      nftContractAddress: '0x4444444444444444444444444444444444444444',
+      nftTokenId: '1234',
+      logIndex: 1
+    });
+
+    const [insertedStablecoin] = await insertWalletEvents([stablecoinEvent]);
+    const [insertedNft] = await insertWalletEvents([nftEvent]);
+    const stablecoinContext = await getWalletEventNotificationContext(insertedStablecoin.id);
+    const nftContext = await getWalletEventNotificationContext(insertedNft.id);
+
+    assert.equal(stablecoinContext.usdValue, '150.00');
+    assert.equal(stablecoinContext.usdValueStatus, 'priced_canonical_stablecoin');
+    assert.equal(stablecoinContext.usdValueSource, 'canonical_stablecoin_parity');
+    assert.ok(stablecoinContext.usdValueCalculatedAt);
+    assert.equal(nftContext.nftContractAddress, nftEvent.nftContractAddress);
+    assert.equal(nftContext.nftTokenId, '1234');
+    assert.equal(nftContext.usdValue, null);
+    assert.equal(nftContext.usdValueStatus, 'unsupported_nft');
   });
 });

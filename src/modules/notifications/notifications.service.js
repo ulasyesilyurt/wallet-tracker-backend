@@ -11,6 +11,10 @@ import {
   upsertNotificationDelivery
 } from './notifications.repository.js';
 import { sendPushNotification } from './firebase.service.js';
+import {
+  buildWalletEventNotificationCopy,
+  buildWalletEventNotificationData
+} from './notificationCopy.js';
 
 const notificationsLogger = logger.child({ module: 'wallet-event-notifications' });
 
@@ -20,34 +24,8 @@ export const NOTIFICATION_OUTBOX_POLL_INTERVAL_MS = 5 * 1000;
 export const NOTIFICATION_OUTBOX_RETRY_BASE_DELAY_MS = 30 * 1000;
 export const NOTIFICATION_OUTBOX_STALE_PROCESSING_MS = 5 * 60 * 1000;
 
-function toEventTypeLabel(eventType) {
-  switch (eventType) {
-    case 'native_transfer':
-      return 'Native transfer';
-    case 'token_transfer':
-      return 'Token transfer';
-    case 'nft_transfer':
-      return 'NFT transfer';
-    case 'nft_buy':
-      return 'NFT buy';
-    case 'nft_sell':
-      return 'NFT sell';
-    default:
-      return eventType;
-  }
-}
-
-function buildNotificationBody({ walletLabel, walletAddress, event }) {
-  const walletDisplay = walletLabel || walletAddress;
-  const assetDisplay = event.assetSymbol || event.assetName || (event.assetType === 'nft' ? 'NFT' : 'asset');
-  const amountDisplay = event.amount ? `${event.amount} ` : '';
-
-  return `${walletDisplay}: ${toEventTypeLabel(event.eventType)}${assetDisplay ? ` • ${amountDisplay}${assetDisplay}` : ''}`;
-}
-
-function buildNotificationMessage({ walletLabel, walletAddress, event, fcmToken }) {
-  const title = walletLabel || 'Tracked wallet activity';
-  const body = buildNotificationBody({ walletLabel, walletAddress, event });
+function buildNotificationMessage({ walletLabel, event, fcmToken }) {
+  const { title, body } = buildWalletEventNotificationCopy({ walletLabel, event });
 
   return {
     token: fcmToken,
@@ -67,13 +45,7 @@ function buildNotificationMessage({ walletLabel, walletAddress, event, fcmToken 
         visibility: 'PUBLIC'
       }
     },
-    data: {
-      walletId: String(event.walletId),
-      walletEventId: String(event.id),
-      transactionHash: event.transactionHash ? String(event.transactionHash) : '',
-      eventType: String(event.eventType),
-      chainId: event.chainId ? String(event.chainId) : ''
-    }
+    data: buildWalletEventNotificationData(event)
   };
 }
 
@@ -82,10 +54,9 @@ function buildNotificationOutboxRetryDelayMs(attemptCount) {
   return NOTIFICATION_OUTBOX_RETRY_BASE_DELAY_MS * normalizedAttemptCount;
 }
 
-async function deliverNotificationForDeviceToken({ event, userId, walletLabel, walletAddress, deviceToken }) {
+async function deliverNotificationForDeviceToken({ event, userId, walletLabel, deviceToken }) {
   const message = buildNotificationMessage({
     walletLabel,
-    walletAddress,
     event,
     fcmToken: deviceToken.fcmToken
   });
@@ -220,7 +191,6 @@ async function processNotificationOutboxJob(job) {
       event: context,
       userId: context.userId,
       walletLabel: context.walletLabel,
-      walletAddress: context.walletAddress,
       deviceToken
     });
 

@@ -31,6 +31,10 @@ function mapWalletEvent(row) {
     toAddress: row.to_address,
     amountWei: row.amount_wei,
     direction: row.direction,
+    usdValue: row.usd_value != null ? row.usd_value.toString() : null,
+    usdValueStatus: row.usd_value_status,
+    usdValueSource: row.usd_value_source,
+    usdValueCalculatedAt: row.usd_value_calculated_at,
     createdAt: row.created_at
   };
 }
@@ -47,6 +51,10 @@ function mapGlobalActivityEvent(row) {
     direction: row.direction,
     assetSymbol: row.asset_symbol,
     amount: row.amount != null ? row.amount.toString() : null,
+    usdValue: row.usd_value != null ? row.usd_value.toString() : null,
+    usdValueStatus: row.usd_value_status,
+    usdValueSource: row.usd_value_source,
+    usdValueCalculatedAt: row.usd_value_calculated_at,
     fromAddress: row.from_address,
     toAddress: row.to_address,
     createdAt: row.created_at,
@@ -299,6 +307,10 @@ export async function listWalletEventsByWalletId(walletId) {
         to_address,
         amount_wei,
         direction,
+        usd_value,
+        usd_value_status,
+        usd_value_source,
+        usd_value_calculated_at,
         created_at
       FROM wallet_events
       WHERE wallet_id = $1
@@ -324,6 +336,10 @@ export async function listGlobalActivityByUserId(userId, { limit, offset }) {
         we.direction,
         we.asset_symbol,
         we.amount,
+        we.usd_value,
+        we.usd_value_status,
+        we.usd_value_source,
+        we.usd_value_calculated_at,
         we.from_address,
         we.to_address,
         we.created_at,

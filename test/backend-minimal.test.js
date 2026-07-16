@@ -685,7 +685,7 @@ describe('event usd enrichment and alert filtering', () => {
     assert.equal(outboxCount, 1);
   });
 
-  test('wallet events response shape still works after valued event insertion', async () => {
+  test('wallet events response includes additive USD valuation fields', async () => {
     await clearWalletEventArtifacts();
     const event = buildTestWalletEvent({
       amount: '0.2',
@@ -704,6 +704,39 @@ describe('event usd enrichment and alert filtering', () => {
     assert.ok(Array.isArray(response.body.data));
     assert.equal(response.body.data[0].transactionHash, event.transactionHash);
     assert.equal(response.body.data[0].eventType, event.eventType);
+    assert.equal(Number(response.body.data[0].amount), Number(event.amount));
+    assert.equal(response.body.data[0].direction, event.direction);
+    assert.equal(response.body.data[0].usdValue, '600.00');
+    assert.equal(response.body.data[0].usdValueStatus, 'priced_native_eth');
+    assert.equal(response.body.data[0].usdValueSource, 'eth_usd');
+    assert.ok(response.body.data[0].usdValueCalculatedAt);
+  });
+
+  test('global activity response includes additive USD valuation fields', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent({
+      amount: '0.2',
+      amountWei: '200000000000000000'
+    });
+
+    await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    const response = await request
+      .get('/api/v1/activity')
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.ok(Array.isArray(response.body.data.items));
+    assert.equal(response.body.data.items[0].transactionHash, event.transactionHash);
+    assert.equal(response.body.data.items[0].eventType, event.eventType);
+    assert.equal(response.body.data.items[0].walletLabel, wallet.label);
+    assert.equal(Number(response.body.data.items[0].amount), Number(event.amount));
+    assert.equal(response.body.data.items[0].usdValue, '600.00');
+    assert.equal(response.body.data.items[0].usdValueStatus, 'priced_native_eth');
+    assert.equal(response.body.data.items[0].usdValueSource, 'eth_usd');
+    assert.ok(response.body.data.items[0].usdValueCalculatedAt);
   });
 
   test('duplicate normalized event insert is idempotent for wallet_events and notification_outbox', async () => {

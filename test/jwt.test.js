@@ -29,10 +29,12 @@ function buildLegacyHs256Token(payload) {
 }
 
 function buildInvalidToken(token) {
-  const lastCharacter = token.slice(-1);
-  const replacementCharacter = lastCharacter === 'x' ? 'y' : 'x';
+  const tokenParts = token.split('.');
+  const signature = tokenParts[2];
+  const replacementCharacter = signature[0] === 'x' ? 'y' : 'x';
 
-  return `${token.slice(0, -1)}${replacementCharacter}`;
+  tokenParts[2] = `${replacementCharacter}${signature.slice(1)}`;
+  return tokenParts.join('.');
 }
 
 async function expectHttpError(promise, expectedCode) {

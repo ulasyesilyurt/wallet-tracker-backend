@@ -7,6 +7,22 @@ import {
 } from '../notifications/notifications.repository.js';
 import { shouldEnqueueNotificationForWalletEvent } from '../notifications/notificationRules.service.js';
 
+function mapUnifiedAssetDetails(row) {
+  const isToken = row.asset_type === 'token';
+  const isNft = row.asset_type === 'nft';
+
+  return {
+    assetContractAddress: isToken
+      ? row.token_contract_address
+      : isNft
+        ? row.nft_contract_address
+        : null,
+    assetTokenId: isNft ? row.nft_token_id : null,
+    assetImageUrl: null,
+    assetDecimals: null
+  };
+}
+
 function mapWalletEvent(row) {
   return {
     id: row.id,
@@ -17,6 +33,7 @@ function mapWalletEvent(row) {
     assetType: row.asset_type,
     assetSymbol: row.asset_symbol,
     assetName: row.asset_name,
+    ...mapUnifiedAssetDetails(row),
     amount: row.amount != null ? row.amount.toString() : null,
     tokenContractAddress: row.token_contract_address,
     nftContractAddress: row.nft_contract_address,
@@ -49,7 +66,10 @@ function mapGlobalActivityEvent(row) {
     transactionHash: row.transaction_hash,
     eventType: row.event_type,
     direction: row.direction,
+    assetType: row.asset_type,
     assetSymbol: row.asset_symbol,
+    assetName: row.asset_name,
+    ...mapUnifiedAssetDetails(row),
     amount: row.amount != null ? row.amount.toString() : null,
     usdValue: row.usd_value != null ? row.usd_value.toString() : null,
     usdValueStatus: row.usd_value_status,
@@ -334,7 +354,12 @@ export async function listGlobalActivityByUserId(userId, { limit, offset }) {
         we.transaction_hash,
         we.event_type,
         we.direction,
+        we.asset_type,
         we.asset_symbol,
+        we.asset_name,
+        we.token_contract_address,
+        we.nft_contract_address,
+        we.nft_token_id,
         we.amount,
         we.usd_value,
         we.usd_value_status,

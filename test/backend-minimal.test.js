@@ -919,6 +919,10 @@ describe('event usd enrichment and alert filtering', () => {
     assert.equal(response.body.data[0].eventType, event.eventType);
     assert.equal(Number(response.body.data[0].amount), Number(event.amount));
     assert.equal(response.body.data[0].direction, event.direction);
+    assert.equal(response.body.data[0].assetContractAddress, null);
+    assert.equal(response.body.data[0].assetTokenId, null);
+    assert.equal(response.body.data[0].assetImageUrl, null);
+    assert.equal(response.body.data[0].assetDecimals, null);
     assert.equal(response.body.data[0].usdValue, '600.00');
     assert.equal(response.body.data[0].usdValueStatus, 'priced_native_eth');
     assert.equal(response.body.data[0].usdValueSource, 'eth_usd');
@@ -945,11 +949,92 @@ describe('event usd enrichment and alert filtering', () => {
     assert.equal(response.body.data.items[0].transactionHash, event.transactionHash);
     assert.equal(response.body.data.items[0].eventType, event.eventType);
     assert.equal(response.body.data.items[0].walletLabel, wallet.label);
+    assert.equal(response.body.data.items[0].assetType, event.assetType);
+    assert.equal(response.body.data.items[0].assetName, event.assetName);
+    assert.equal(response.body.data.items[0].assetContractAddress, null);
+    assert.equal(response.body.data.items[0].assetTokenId, null);
+    assert.equal(response.body.data.items[0].assetImageUrl, null);
+    assert.equal(response.body.data.items[0].assetDecimals, null);
     assert.equal(Number(response.body.data.items[0].amount), Number(event.amount));
     assert.equal(response.body.data.items[0].usdValue, '600.00');
     assert.equal(response.body.data.items[0].usdValueStatus, 'priced_native_eth');
     assert.equal(response.body.data.items[0].usdValueSource, 'eth_usd');
     assert.ok(response.body.data.items[0].usdValueCalculatedAt);
+  });
+
+  test('wallet history and global activity expose matching token and NFT asset details', async () => {
+    await clearWalletEventArtifacts();
+    const tokenEvent = buildTestWalletEvent({
+      eventType: 'token_transfer',
+      assetType: 'token',
+      assetSymbol: 'USDC',
+      assetName: 'USD Coin',
+      amount: '150',
+      amountWei: null,
+      tokenContractAddress: '0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+    });
+    const nftEvent = buildTestWalletEvent({
+      eventType: 'nft_transfer',
+      assetType: 'nft',
+      assetSymbol: 'TEST',
+      assetName: 'Test Collection',
+      amount: '1',
+      amountWei: null,
+      tokenContractAddress: null,
+      nftContractAddress: '0x4444444444444444444444444444444444444444',
+      nftTokenId: '1234',
+      logIndex: 1
+    });
+
+    await insertWalletEvents([tokenEvent, nftEvent]);
+
+    const walletResponse = await request
+      .get(`/api/v1/wallets/${wallet.id}/events`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    const activityResponse = await request
+      .get('/api/v1/activity')
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(walletResponse.status, 200);
+    assert.equal(activityResponse.status, 200);
+
+    const walletToken = walletResponse.body.data.find((event) => event.transactionHash === tokenEvent.transactionHash);
+    const activityToken = activityResponse.body.data.items.find((event) => event.transactionHash === tokenEvent.transactionHash);
+    const walletNft = walletResponse.body.data.find((event) => event.transactionHash === nftEvent.transactionHash);
+    const activityNft = activityResponse.body.data.items.find((event) => event.transactionHash === nftEvent.transactionHash);
+
+    assert.ok(walletToken);
+    assert.ok(activityToken);
+    assert.equal(walletToken.assetContractAddress, tokenEvent.tokenContractAddress);
+    assert.equal(activityToken.assetContractAddress, tokenEvent.tokenContractAddress);
+    assert.equal(walletToken.assetTokenId, null);
+    assert.equal(activityToken.assetTokenId, null);
+    assert.equal(walletToken.assetImageUrl, null);
+    assert.equal(activityToken.assetImageUrl, null);
+    assert.equal(walletToken.assetDecimals, null);
+    assert.equal(activityToken.assetDecimals, null);
+    assert.equal(walletToken.tokenContractAddress, tokenEvent.tokenContractAddress);
+    assert.equal(walletToken.usdValue, '150.00');
+    assert.equal(activityToken.usdValue, '150.00');
+    assert.equal(activityToken.assetType, tokenEvent.assetType);
+    assert.equal(activityToken.assetName, tokenEvent.assetName);
+
+    assert.ok(walletNft);
+    assert.ok(activityNft);
+    assert.equal(walletNft.assetContractAddress, nftEvent.nftContractAddress);
+    assert.equal(activityNft.assetContractAddress, nftEvent.nftContractAddress);
+    assert.equal(walletNft.assetTokenId, nftEvent.nftTokenId);
+    assert.equal(activityNft.assetTokenId, nftEvent.nftTokenId);
+    assert.equal(walletNft.assetImageUrl, null);
+    assert.equal(activityNft.assetImageUrl, null);
+    assert.equal(walletNft.assetDecimals, null);
+    assert.equal(activityNft.assetDecimals, null);
+    assert.equal(walletNft.nftContractAddress, nftEvent.nftContractAddress);
+    assert.equal(walletNft.nftTokenId, nftEvent.nftTokenId);
+    assert.equal(walletNft.usdValue, null);
+    assert.equal(activityNft.usdValue, null);
+    assert.equal(activityNft.assetType, nftEvent.assetType);
+    assert.equal(activityNft.assetName, nftEvent.assetName);
   });
 
   test('duplicate normalized event insert is idempotent for wallet_events and notification_outbox', async () => {

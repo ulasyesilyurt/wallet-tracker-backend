@@ -75,6 +75,9 @@ export const putWalletAlertSettingsSchema = z.object({
   body: z.object({
     minimumAlertUsd: z.number().min(0).nullable(),
     notificationsEnabled: z.boolean(),
+    notifyFungibleTransfers: z.boolean().optional(),
+    notifyIncomingTransfers: z.boolean().optional(),
+    notifyOutgoingTransfers: z.boolean().optional(),
     notifyNftTransfers: z.boolean()
   }),
   query: z.object({}).optional()

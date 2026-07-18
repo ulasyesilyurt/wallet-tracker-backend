@@ -1,0 +1,4 @@
+ALTER TABLE wallet_alert_settings
+  ADD COLUMN IF NOT EXISTS notify_fungible_transfers BOOLEAN NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS notify_incoming_transfers BOOLEAN NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS notify_outgoing_transfers BOOLEAN NOT NULL DEFAULT TRUE;

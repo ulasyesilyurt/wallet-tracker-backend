@@ -8,12 +8,19 @@ export function applyWalletAlertSettingsDefaults(alertSettings = null) {
         ? Number(alertSettings.minimumAlertUsd)
         : env.DEFAULT_WALLET_ALERT_MINIMUM_USD,
     notificationsEnabled: alertSettings?.notificationsEnabled ?? true,
+    notifyFungibleTransfers: alertSettings?.notifyFungibleTransfers ?? true,
+    notifyIncomingTransfers: alertSettings?.notifyIncomingTransfers ?? true,
+    notifyOutgoingTransfers: alertSettings?.notifyOutgoingTransfers ?? true,
     notifyNftTransfers: alertSettings?.notifyNftTransfers ?? true
   };
 }
 
 function isNftLikeEvent(event) {
   return event.assetType === 'nft' || event.eventType === 'nft_transfer' || event.eventType === 'nft_buy' || event.eventType === 'nft_sell';
+}
+
+function isFungibleTransferEvent(event) {
+  return event.assetType === 'coin' || event.assetType === 'token' || event.eventType === 'native_transfer' || event.eventType === 'token_transfer';
 }
 
 export function shouldEnqueueNotificationForWalletEvent({ event, alertSettings }) {
@@ -31,6 +38,43 @@ export function shouldEnqueueNotificationForWalletEvent({ event, alertSettings }
     return {
       shouldEnqueue: effectiveAlertSettings.notifyNftTransfers,
       reason: effectiveAlertSettings.notifyNftTransfers ? 'nft_notifications_enabled' : 'nft_notifications_disabled',
+      minimumAlertUsd: effectiveAlertSettings.minimumAlertUsd
+    };
+  }
+
+  if (isFungibleTransferEvent(event) && !effectiveAlertSettings.notifyFungibleTransfers) {
+    return {
+      shouldEnqueue: false,
+      reason: 'fungible_notifications_disabled',
+      minimumAlertUsd: effectiveAlertSettings.minimumAlertUsd
+    };
+  }
+
+  if (isFungibleTransferEvent(event) && event.direction === 'incoming' && !effectiveAlertSettings.notifyIncomingTransfers) {
+    return {
+      shouldEnqueue: false,
+      reason: 'incoming_notifications_disabled',
+      minimumAlertUsd: effectiveAlertSettings.minimumAlertUsd
+    };
+  }
+
+  if (isFungibleTransferEvent(event) && event.direction === 'outgoing' && !effectiveAlertSettings.notifyOutgoingTransfers) {
+    return {
+      shouldEnqueue: false,
+      reason: 'outgoing_notifications_disabled',
+      minimumAlertUsd: effectiveAlertSettings.minimumAlertUsd
+    };
+  }
+
+  if (
+    isFungibleTransferEvent(event) &&
+    event.direction !== 'incoming' &&
+    event.direction !== 'outgoing' &&
+    (!effectiveAlertSettings.notifyIncomingTransfers || !effectiveAlertSettings.notifyOutgoingTransfers)
+  ) {
+    return {
+      shouldEnqueue: false,
+      reason: 'transfer_direction_unavailable',
       minimumAlertUsd: effectiveAlertSettings.minimumAlertUsd
     };
   }

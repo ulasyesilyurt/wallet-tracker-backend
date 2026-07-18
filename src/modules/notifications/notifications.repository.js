@@ -122,6 +122,9 @@ function mapWalletAlertSettingsRow(row) {
     walletId: row.wallet_id,
     minimumAlertUsd: row.minimum_alert_usd != null ? Number(row.minimum_alert_usd) : null,
     notificationsEnabled: row.notifications_enabled,
+    notifyFungibleTransfers: row.notify_fungible_transfers,
+    notifyIncomingTransfers: row.notify_incoming_transfers,
+    notifyOutgoingTransfers: row.notify_outgoing_transfers,
     notifyNftTransfers: row.notify_nft_transfers,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -136,6 +139,9 @@ export async function getWalletAlertSettingsByWalletId(dbClient, walletId) {
         wallet_id,
         minimum_alert_usd,
         notifications_enabled,
+        notify_fungible_transfers,
+        notify_incoming_transfers,
+        notify_outgoing_transfers,
         notify_nft_transfers,
         created_at,
         updated_at

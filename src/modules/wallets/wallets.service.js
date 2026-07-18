@@ -25,6 +25,9 @@ function toPublicWalletAlertSettings(settings) {
     walletId: settings.walletId,
     minimumAlertUsd: settings.minimumAlertUsd,
     notificationsEnabled: settings.notificationsEnabled,
+    notifyFungibleTransfers: settings.notifyFungibleTransfers,
+    notifyIncomingTransfers: settings.notifyIncomingTransfers,
+    notifyOutgoingTransfers: settings.notifyOutgoingTransfers,
     notifyNftTransfers: settings.notifyNftTransfers
   };
 }
@@ -198,6 +201,15 @@ export async function replaceWalletAlertSettings(walletId, userId, payload) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
   }
 
-  const updatedSettings = await upsertWalletAlertSettings(walletId, payload);
+  const existingSettings = applyWalletAlertSettingsDefaults({
+    walletId,
+    ...await findWalletAlertSettingsByWalletId(walletId)
+  });
+  const updatedSettings = await upsertWalletAlertSettings(walletId, {
+    ...payload,
+    notifyFungibleTransfers: payload.notifyFungibleTransfers ?? existingSettings.notifyFungibleTransfers,
+    notifyIncomingTransfers: payload.notifyIncomingTransfers ?? existingSettings.notifyIncomingTransfers,
+    notifyOutgoingTransfers: payload.notifyOutgoingTransfers ?? existingSettings.notifyOutgoingTransfers
+  });
   return toPublicWalletAlertSettings(updatedSettings);
 }

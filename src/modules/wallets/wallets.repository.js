@@ -65,6 +65,9 @@ function mapWalletAlertSettings(row) {
     walletId: row.wallet_id,
     minimumAlertUsd: row.minimum_alert_usd != null ? Number(row.minimum_alert_usd) : null,
     notificationsEnabled: row.notifications_enabled,
+    notifyFungibleTransfers: row.notify_fungible_transfers,
+    notifyIncomingTransfers: row.notify_incoming_transfers,
+    notifyOutgoingTransfers: row.notify_outgoing_transfers,
     notifyNftTransfers: row.notify_nft_transfers,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -93,6 +96,9 @@ export async function findWalletAlertSettingsByWalletId(walletId) {
         wallet_id,
         minimum_alert_usd,
         notifications_enabled,
+        notify_fungible_transfers,
+        notify_incoming_transfers,
+        notify_outgoing_transfers,
         notify_nft_transfers,
         created_at,
         updated_at
@@ -109,6 +115,9 @@ export async function findWalletAlertSettingsByWalletId(walletId) {
 export async function upsertWalletAlertSettings(walletId, {
   minimumAlertUsd,
   notificationsEnabled,
+  notifyFungibleTransfers,
+  notifyIncomingTransfers,
+  notifyOutgoingTransfers,
   notifyNftTransfers
 }) {
   const result = await query(
@@ -117,26 +126,43 @@ export async function upsertWalletAlertSettings(walletId, {
         wallet_id,
         minimum_alert_usd,
         notifications_enabled,
+        notify_fungible_transfers,
+        notify_incoming_transfers,
+        notify_outgoing_transfers,
         notify_nft_transfers,
         created_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, NOW(), NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
       ON CONFLICT (wallet_id)
       DO UPDATE SET
         minimum_alert_usd = EXCLUDED.minimum_alert_usd,
         notifications_enabled = EXCLUDED.notifications_enabled,
+        notify_fungible_transfers = EXCLUDED.notify_fungible_transfers,
+        notify_incoming_transfers = EXCLUDED.notify_incoming_transfers,
+        notify_outgoing_transfers = EXCLUDED.notify_outgoing_transfers,
         notify_nft_transfers = EXCLUDED.notify_nft_transfers,
         updated_at = NOW()
       RETURNING
         wallet_id,
         minimum_alert_usd,
         notifications_enabled,
+        notify_fungible_transfers,
+        notify_incoming_transfers,
+        notify_outgoing_transfers,
         notify_nft_transfers,
         created_at,
         updated_at
     `,
-    [walletId, minimumAlertUsd, notificationsEnabled, notifyNftTransfers]
+    [
+      walletId,
+      minimumAlertUsd,
+      notificationsEnabled,
+      notifyFungibleTransfers,
+      notifyIncomingTransfers,
+      notifyOutgoingTransfers,
+      notifyNftTransfers
+    ]
   );
 
   return mapWalletAlertSettings(result.rows[0]);

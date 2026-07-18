@@ -156,6 +156,48 @@ async function clearWalletEventArtifacts() {
   await query('DELETE FROM wallet_events WHERE wallet_id = $1', [wallet.id]);
 }
 
+async function seedWalletAlertSettings({
+  minimumAlertUsd = 100,
+  notificationsEnabled = true,
+  notifyFungibleTransfers = true,
+  notifyIncomingTransfers = true,
+  notifyOutgoingTransfers = true,
+  notifyNftTransfers = true
+} = {}) {
+  await query(
+    `
+      INSERT INTO wallet_alert_settings (
+        wallet_id,
+        minimum_alert_usd,
+        notifications_enabled,
+        notify_fungible_transfers,
+        notify_incoming_transfers,
+        notify_outgoing_transfers,
+        notify_nft_transfers
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (wallet_id)
+      DO UPDATE SET
+        minimum_alert_usd = EXCLUDED.minimum_alert_usd,
+        notifications_enabled = EXCLUDED.notifications_enabled,
+        notify_fungible_transfers = EXCLUDED.notify_fungible_transfers,
+        notify_incoming_transfers = EXCLUDED.notify_incoming_transfers,
+        notify_outgoing_transfers = EXCLUDED.notify_outgoing_transfers,
+        notify_nft_transfers = EXCLUDED.notify_nft_transfers,
+        updated_at = NOW()
+    `,
+    [
+      wallet.id,
+      minimumAlertUsd,
+      notificationsEnabled,
+      notifyFungibleTransfers,
+      notifyIncomingTransfers,
+      notifyOutgoingTransfers,
+      notifyNftTransfers
+    ]
+  );
+}
+
 function buildTestWalletEvent(overrides = {}) {
   const transactionHash = overrides.transactionHash ?? `0x${randomUUID().replaceAll('-', '').padEnd(64, '0').slice(0, 64)}`;
   const blockNumber = overrides.blockNumber ?? Math.floor(Date.now() / 1000);
@@ -181,7 +223,7 @@ function buildTestWalletEvent(overrides = {}) {
     fromAddress: overrides.fromAddress ?? '0x2222222222222222222222222222222222222222',
     toAddress: overrides.toAddress ?? wallet.address.toLowerCase(),
     amountWei: overrides.amountWei ?? '1000000000000000000',
-    direction: overrides.direction ?? 'incoming'
+    direction: Object.hasOwn(overrides, 'direction') ? overrides.direction : 'incoming'
   };
 }
 
@@ -335,6 +377,9 @@ describe('wallet alert settings api', () => {
       walletId: wallet.id,
       minimumAlertUsd: 100,
       notificationsEnabled: true,
+      notifyFungibleTransfers: true,
+      notifyIncomingTransfers: true,
+      notifyOutgoingTransfers: true,
       notifyNftTransfers: true
     });
   });
@@ -370,6 +415,9 @@ describe('wallet alert settings api', () => {
       .send({
         minimumAlertUsd: 250,
         notificationsEnabled: true,
+        notifyFungibleTransfers: false,
+        notifyIncomingTransfers: false,
+        notifyOutgoingTransfers: true,
         notifyNftTransfers: false
       });
 
@@ -378,6 +426,9 @@ describe('wallet alert settings api', () => {
       walletId: wallet.id,
       minimumAlertUsd: 250,
       notificationsEnabled: true,
+      notifyFungibleTransfers: false,
+      notifyIncomingTransfers: false,
+      notifyOutgoingTransfers: true,
       notifyNftTransfers: false
     });
 
@@ -390,11 +441,44 @@ describe('wallet alert settings api', () => {
       walletId: wallet.id,
       minimumAlertUsd: 250,
       notificationsEnabled: true,
+      notifyFungibleTransfers: false,
+      notifyIncomingTransfers: false,
+      notifyOutgoingTransfers: true,
+      notifyNftTransfers: false
+    });
+  });
+
+  test('legacy three-field PUT preserves existing transfer controls', async () => {
+    await seedWalletAlertSettings({
+      notifyFungibleTransfers: false,
+      notifyIncomingTransfers: true,
+      notifyOutgoingTransfers: false
+    });
+
+    const response = await request
+      .put(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        minimumAlertUsd: 75,
+        notificationsEnabled: true,
+        notifyNftTransfers: false
+      });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.data, {
+      walletId: wallet.id,
+      minimumAlertUsd: 75,
+      notificationsEnabled: true,
+      notifyFungibleTransfers: false,
+      notifyIncomingTransfers: true,
+      notifyOutgoingTransfers: false,
       notifyNftTransfers: false
     });
   });
 
   test('PUT accepts null minimumAlertUsd and persists it', async () => {
+    await query('DELETE FROM wallet_alert_settings WHERE wallet_id = $1', [wallet.id]);
+
     const response = await request
       .put(`/api/v1/wallets/${wallet.id}/alert-settings`)
       .set('Authorization', `Bearer ${ownerToken}`)
@@ -409,6 +493,9 @@ describe('wallet alert settings api', () => {
       walletId: wallet.id,
       minimumAlertUsd: null,
       notificationsEnabled: false,
+      notifyFungibleTransfers: true,
+      notifyIncomingTransfers: true,
+      notifyOutgoingTransfers: true,
       notifyNftTransfers: true
     });
   });
@@ -434,6 +521,22 @@ describe('wallet alert settings api', () => {
       .send({
         minimumAlertUsd: -1,
         notificationsEnabled: true,
+        notifyNftTransfers: true
+      });
+
+    assert.equal(response.status, 400);
+  });
+
+  test('PUT rejects invalid transfer control booleans', async () => {
+    const response = await request
+      .put(`/api/v1/wallets/${wallet.id}/alert-settings`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        minimumAlertUsd: 10,
+        notificationsEnabled: true,
+        notifyFungibleTransfers: 'yes',
+        notifyIncomingTransfers: true,
+        notifyOutgoingTransfers: true,
         notifyNftTransfers: true
       });
 
@@ -608,17 +711,7 @@ describe('event usd enrichment and alert filtering', () => {
 
   test('NFT event keeps usd value null and respects notify_nft_transfers', async () => {
     await clearWalletEventArtifacts();
-    await query(
-      `
-        INSERT INTO wallet_alert_settings (
-          wallet_id,
-          notify_nft_transfers,
-          notifications_enabled
-        )
-        VALUES ($1, FALSE, TRUE)
-      `,
-      [wallet.id]
-    );
+    await seedWalletAlertSettings({ notifyNftTransfers: false });
 
     const event = buildTestWalletEvent({
       eventType: 'nft_transfer',
@@ -643,31 +736,151 @@ describe('event usd enrichment and alert filtering', () => {
     assert.equal(outboxCount, 0);
   });
 
-  test('notifications_enabled false prevents notification outbox creation', async () => {
+  test('NFT alerts ignore fungible controls and minimum USD threshold', async () => {
     await clearWalletEventArtifacts();
-    await query(
-      `
-        INSERT INTO wallet_alert_settings (
-          wallet_id,
-          notifications_enabled,
-          minimum_alert_usd
-        )
-        VALUES ($1, FALSE, 1)
-      `,
-      [wallet.id]
-    );
-
+    await seedWalletAlertSettings({
+      minimumAlertUsd: 999999,
+      notifyFungibleTransfers: false,
+      notifyIncomingTransfers: false,
+      notifyOutgoingTransfers: false,
+      notifyNftTransfers: true
+    });
     const event = buildTestWalletEvent({
+      eventType: 'nft_transfer',
+      assetType: 'nft',
+      assetSymbol: 'NFT',
+      assetName: 'Test NFT',
+      amount: '1',
+      amountWei: null,
+      tokenContractAddress: null,
+      nftContractAddress: '0x4444444444444444444444444444444444444444',
+      nftTokenId: '456'
+    });
+
+    await insertWalletEvents([event]);
+
+    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
+    assert.equal(outboxCount, 1);
+  });
+
+  test('notifications_enabled false prevents fungible and NFT notification outbox creation', async () => {
+    await clearWalletEventArtifacts();
+    await seedWalletAlertSettings({
+      notificationsEnabled: false,
+      minimumAlertUsd: 1
+    });
+
+    const fungibleEvent = buildTestWalletEvent({
       amount: '1',
       amountWei: '1000000000000000000'
     });
+    const nftEvent = buildTestWalletEvent({
+      eventType: 'nft_transfer',
+      assetType: 'nft',
+      assetSymbol: 'NFT',
+      assetName: 'Test NFT',
+      amount: '1',
+      amountWei: null,
+      tokenContractAddress: null,
+      nftContractAddress: '0x5555555555555555555555555555555555555555',
+      nftTokenId: '789'
+    });
 
-    await insertWalletEvents([event], null, {
+    await insertWalletEvents([fungibleEvent, nftEvent], null, {
       getEthUsdPrice: async () => 3000
     });
 
-    const outboxCount = await countNotificationOutboxRowsForTransaction(event.transactionHash);
-    assert.equal(outboxCount, 0);
+    assert.equal(await countNotificationOutboxRowsForTransaction(fungibleEvent.transactionHash), 0);
+    assert.equal(await countNotificationOutboxRowsForTransaction(nftEvent.transactionHash), 0);
+  });
+
+  test('notify_fungible_transfers false suppresses native and token alerts', async () => {
+    await clearWalletEventArtifacts();
+    await seedWalletAlertSettings({
+      minimumAlertUsd: 1,
+      notifyFungibleTransfers: false
+    });
+    const nativeEvent = buildTestWalletEvent();
+    const tokenEvent = buildTestWalletEvent({
+      eventType: 'token_transfer',
+      assetType: 'token',
+      assetSymbol: 'USDC',
+      assetName: 'USD Coin',
+      amount: '500',
+      amountWei: null,
+      tokenContractAddress: '0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+    });
+
+    await insertWalletEvents([nativeEvent, tokenEvent], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    assert.equal(await countNotificationOutboxRowsForTransaction(nativeEvent.transactionHash), 0);
+    assert.equal(await countNotificationOutboxRowsForTransaction(tokenEvent.transactionHash), 0);
+  });
+
+  test('notify_incoming_transfers false suppresses received fungible alerts only', async () => {
+    await clearWalletEventArtifacts();
+    await seedWalletAlertSettings({
+      minimumAlertUsd: 1,
+      notifyIncomingTransfers: false,
+      notifyOutgoingTransfers: true
+    });
+    const incomingEvent = buildTestWalletEvent({ direction: 'incoming' });
+    const outgoingEvent = buildTestWalletEvent({ direction: 'outgoing' });
+
+    await insertWalletEvents([incomingEvent, outgoingEvent], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    assert.equal(await countNotificationOutboxRowsForTransaction(incomingEvent.transactionHash), 0);
+    assert.equal(await countNotificationOutboxRowsForTransaction(outgoingEvent.transactionHash), 1);
+  });
+
+  test('notify_outgoing_transfers false suppresses sent fungible alerts only', async () => {
+    await clearWalletEventArtifacts();
+    await seedWalletAlertSettings({
+      minimumAlertUsd: 1,
+      notifyIncomingTransfers: true,
+      notifyOutgoingTransfers: false
+    });
+    const incomingEvent = buildTestWalletEvent({ direction: 'incoming' });
+    const outgoingEvent = buildTestWalletEvent({ direction: 'outgoing' });
+
+    await insertWalletEvents([incomingEvent, outgoingEvent], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    assert.equal(await countNotificationOutboxRowsForTransaction(incomingEvent.transactionHash), 1);
+    assert.equal(await countNotificationOutboxRowsForTransaction(outgoingEvent.transactionHash), 0);
+  });
+
+  test('unknown direction only notifies when both direction toggles are enabled', async () => {
+    await clearWalletEventArtifacts();
+    await seedWalletAlertSettings({
+      minimumAlertUsd: 1,
+      notifyIncomingTransfers: true,
+      notifyOutgoingTransfers: true
+    });
+    const allowedEvent = buildTestWalletEvent({ direction: null });
+
+    await insertWalletEvents([allowedEvent], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    await seedWalletAlertSettings({
+      minimumAlertUsd: 1,
+      notifyIncomingTransfers: false,
+      notifyOutgoingTransfers: true
+    });
+    const suppressedEvent = buildTestWalletEvent({ direction: null });
+
+    await insertWalletEvents([suppressedEvent], null, {
+      getEthUsdPrice: async () => 3000
+    });
+
+    assert.equal(await countNotificationOutboxRowsForTransaction(allowedEvent.transactionHash), 1);
+    assert.equal(await countNotificationOutboxRowsForTransaction(suppressedEvent.transactionHash), 0);
   });
 
   test('missing wallet_alert_settings uses defaults', async () => {

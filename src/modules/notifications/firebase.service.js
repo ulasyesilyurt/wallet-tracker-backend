@@ -1,5 +1,6 @@
 import { logger } from '../../config/logger.js';
 import { env } from '../../config/env.js';
+import { buildSafeFirebaseLogMetadata } from './firebaseLogMetadata.js';
 
 const firebaseLogger = logger.child({ module: 'firebase-notifications' });
 
@@ -51,9 +52,7 @@ async function getMessaging() {
 export async function sendPushNotification(message) {
   if (!env.ENABLE_PUSH_NOTIFICATIONS) {
     firebaseLogger.info({
-      tokenLength: typeof message.token === 'string' ? message.token.length : 0,
-      title: message.notification?.title,
-      body: message.notification?.body
+      ...buildSafeFirebaseLogMetadata(message)
     }, 'Push notifications disabled; skipping delivery');
 
     return {
@@ -67,7 +66,7 @@ export async function sendPushNotification(message) {
   const providerMessageId = await messaging.send(message, env.FIREBASE_DRY_RUN);
 
   firebaseLogger.info({
-    tokenLength: typeof message.token === 'string' ? message.token.length : 0,
+    ...buildSafeFirebaseLogMetadata(message),
     dryRun: env.FIREBASE_DRY_RUN,
     providerMessageId
   }, 'Push notification sent through Firebase');

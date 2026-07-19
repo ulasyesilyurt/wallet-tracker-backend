@@ -15,6 +15,7 @@ import {
   buildWalletEventNotificationCopy,
   buildWalletEventNotificationData
 } from './notificationCopy.js';
+import { buildSafeFirebaseLogMetadata } from './firebaseLogMetadata.js';
 
 const notificationsLogger = logger.child({ module: 'wallet-event-notifications' });
 
@@ -63,19 +64,12 @@ async function deliverNotificationForDeviceToken({ event, userId, walletLabel, d
 
   try {
     notificationsLogger.info({
-      walletEventId: event.id,
       deviceTokenId: deviceToken.id,
       userId,
-      transactionHash: event.transactionHash,
       deliveryStatus: 'pending',
-      firebasePayloadPreview: {
-        hasNotification: true,
-        androidPriority: message.android?.priority,
-        androidChannelId: message.android?.notification?.channelId,
-        notificationTitle: message.notification?.title,
-        notificationBody: message.notification?.body,
-        dataKeys: Object.keys(message.data ?? {})
-      }
+      ...buildSafeFirebaseLogMetadata(message),
+      androidPriority: message.android?.priority,
+      androidChannelId: message.android?.notification?.channelId
     }, 'Attempting notification_deliveries upsert before Firebase send');
 
     await upsertNotificationDelivery({
@@ -95,10 +89,8 @@ async function deliverNotificationForDeviceToken({ event, userId, walletLabel, d
     });
 
     notificationsLogger.info({
-      walletEventId: event.id,
       deviceTokenId: deviceToken.id,
       userId,
-      transactionHash: event.transactionHash,
       delivered: delivery.delivered,
       skipped: delivery.skipped ?? false,
       providerMessageId: delivery.providerMessageId ?? null
@@ -114,11 +106,10 @@ async function deliverNotificationForDeviceToken({ event, userId, walletLabel, d
     });
 
     notificationsLogger.error({
-      err: error,
-      walletEventId: event.id,
-      walletId: event.walletId,
       deviceTokenId: deviceToken.id,
-      transactionHash: event.transactionHash
+      userId,
+      errorName: error.name,
+      errorCode: error.code ?? null
     }, 'Failed to deliver wallet event push notification');
 
     return {
@@ -139,8 +130,7 @@ async function processNotificationOutboxJob(job) {
     });
 
     notificationsLogger.error({
-      outboxJobId: job.id,
-      walletEventId: job.walletEventId
+      outboxJobId: job.id
     }, 'Notification outbox job failed because wallet event context was missing');
 
     return { status: 'failed', deliveredCount: 0, failedCount: 0, skippedCount: 0 };
@@ -148,10 +138,7 @@ async function processNotificationOutboxJob(job) {
 
   notificationsLogger.info({
     outboxJobId: job.id,
-    walletEventId: context.id,
-    walletId: context.walletId,
     userId: context.userId,
-    transactionHash: context.transactionHash,
     attemptCount: job.attemptCount
   }, 'Processing notification outbox job');
 
@@ -159,11 +146,8 @@ async function processNotificationOutboxJob(job) {
 
   notificationsLogger.info({
     outboxJobId: job.id,
-    walletEventId: context.id,
-    walletId: context.walletId,
     userId: context.userId,
-    deviceTokensFound: deviceTokens.length,
-    deviceTokenIds: deviceTokens.map((deviceToken) => deviceToken.id)
+    deviceTokensFound: deviceTokens.length
   }, 'Resolved active device tokens for notification outbox job');
 
   if (deviceTokens.length === 0) {
@@ -171,8 +155,6 @@ async function processNotificationOutboxJob(job) {
 
     notificationsLogger.info({
       outboxJobId: job.id,
-      walletEventId: context.id,
-      walletId: context.walletId,
       userId: context.userId,
       deliveredCount: 0,
       failedCount: 0,
@@ -207,10 +189,7 @@ async function processNotificationOutboxJob(job) {
 
   notificationsLogger.info({
     outboxJobId: job.id,
-    walletEventId: context.id,
-    walletId: context.walletId,
     userId: context.userId,
-    transactionHash: context.transactionHash,
     deliveredCount,
     failedCount,
     skippedCount
@@ -262,9 +241,9 @@ export async function processNotificationOutboxBatch({
         failedCount += 1;
 
         notificationsLogger.error({
-          err: error,
           outboxJobId: job.id,
-          walletEventId: job.walletEventId,
+          errorName: error.name,
+          errorCode: error.code ?? null,
           attemptCount: job.attemptCount,
           maxAttempts
         }, 'Notification outbox job failed permanently');
@@ -279,9 +258,9 @@ export async function processNotificationOutboxBatch({
         retryScheduledCount += 1;
 
         notificationsLogger.warn({
-          err: error,
           outboxJobId: job.id,
-          walletEventId: job.walletEventId,
+          errorName: error.name,
+          errorCode: error.code ?? null,
           attemptCount: job.attemptCount,
           nextAttemptAt,
           retryDelayMs

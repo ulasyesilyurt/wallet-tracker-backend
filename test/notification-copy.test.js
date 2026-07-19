@@ -4,6 +4,7 @@ import {
   buildWalletEventNotificationCopy,
   buildWalletEventNotificationData
 } from '../src/modules/notifications/notificationCopy.js';
+import { buildSafeFirebaseLogMetadata } from '../src/modules/notifications/firebaseLogMetadata.js';
 
 function buildEvent(overrides = {}) {
   return {
@@ -204,5 +205,31 @@ describe('wallet event notification copy', () => {
     });
 
     assert.equal(Object.values(data).every((value) => typeof value === 'string'), true);
+  });
+
+  test('builds Firebase log metadata without token or payload values', () => {
+    const token = 'sensitive-fcm-token-value';
+    const message = {
+      token,
+      notification: {
+        title: 'Sensitive notification title',
+        body: 'Sensitive notification body'
+      },
+      data: buildWalletEventNotificationData(buildEvent())
+    };
+
+    const metadata = buildSafeFirebaseLogMetadata(message);
+    const serializedMetadata = JSON.stringify(metadata);
+
+    assert.deepEqual(metadata, {
+      tokenLength: token.length,
+      hasNotification: true,
+      dataFieldCount: Object.keys(message.data).length
+    });
+    assert.equal(serializedMetadata.includes(token), false);
+    assert.equal(serializedMetadata.includes(message.data.walletId), false);
+    assert.equal(serializedMetadata.includes(message.data.walletEventId), false);
+    assert.equal(serializedMetadata.includes(message.notification.title), false);
+    assert.equal(serializedMetadata.includes(message.notification.body), false);
   });
 });

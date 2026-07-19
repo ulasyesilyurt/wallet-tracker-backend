@@ -10,7 +10,14 @@ const walletEventsParamsSchema = z.object({
   params: z.object({
     walletId: z.string().uuid()
   }),
-  query: z.object({}).default({}),
+  query: z
+    .object({
+      groupTransactions: z
+        .enum(['true', 'false'])
+        .default('false')
+        .transform((value) => value === 'true')
+    })
+    .default({}),
   body: z.object({}).default({})
 });
 

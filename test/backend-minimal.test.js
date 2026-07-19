@@ -927,6 +927,75 @@ describe('event usd enrichment and alert filtering', () => {
     assert.equal(response.body.data[0].usdValueStatus, 'priced_native_eth');
     assert.equal(response.body.data[0].usdValueSource, 'eth_usd');
     assert.ok(response.body.data[0].usdValueCalculatedAt);
+    assert.equal(Object.hasOwn(response.body.data[0], 'itemType'), false);
+    assert.equal(Object.hasOwn(response.body.data[0], 'sourceEventIds'), false);
+  });
+
+  test('wallet events opt-in grouping wraps a simple event additively', async () => {
+    await clearWalletEventArtifacts();
+    const event = buildTestWalletEvent();
+
+    const insertedEvents = await insertWalletEvents([event], null, {
+      getEthUsdPrice: async () => 3000
+    });
+    const response = await request
+      .get(`/api/v1/wallets/${wallet.id}/events?groupTransactions=true`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.data.length, 1);
+    assert.equal(response.body.data[0].itemType, 'event');
+    assert.deepEqual(response.body.data[0].sourceEventIds, [insertedEvents[0].id]);
+    assert.equal(response.body.data[0].transactionHash, event.transactionHash);
+  });
+
+  test('wallet events opt-in grouping returns a clear NFT purchase transaction', async () => {
+    await clearWalletEventArtifacts();
+    const transactionHash = buildTestWalletEvent().transactionHash;
+    const paymentEvent = buildTestWalletEvent({
+      transactionHash,
+      direction: 'outgoing',
+      fromAddress: wallet.address,
+      toAddress: '0x2222222222222222222222222222222222222222',
+      amount: '0.2',
+      amountWei: '200000000000000000',
+      logIndex: 0
+    });
+    const nftEvent = buildTestWalletEvent({
+      transactionHash,
+      eventType: 'nft_transfer',
+      assetType: 'nft',
+      assetSymbol: 'TEST',
+      assetName: 'Test Collection',
+      amount: '1',
+      amountWei: null,
+      direction: 'incoming',
+      fromAddress: '0x3333333333333333333333333333333333333333',
+      toAddress: wallet.address,
+      nftContractAddress: '0x4444444444444444444444444444444444444444',
+      nftTokenId: '123',
+      logIndex: 1
+    });
+
+    const insertedEvents = await insertWalletEvents([paymentEvent, nftEvent], null, {
+      getEthUsdPrice: async () => 3000
+    });
+    const response = await request
+      .get(`/api/v1/wallets/${wallet.id}/events?groupTransactions=true`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.data.length, 1);
+    assert.equal(response.body.data[0].itemType, 'transaction');
+    assert.equal(response.body.data[0].activityType, 'nft_purchase');
+    assert.equal(response.body.data[0].usdValue, '600.00');
+    assert.equal(response.body.data[0].usdValueStatus, 'priced_group_payment');
+    assert.deepEqual(
+      [...response.body.data[0].sourceEventIds].sort(),
+      insertedEvents.map((event) => event.id).sort()
+    );
+    assert.equal(response.body.data[0].sentAssets[0].eventId, insertedEvents[0].id);
+    assert.equal(response.body.data[0].receivedAssets[0].eventId, insertedEvents[1].id);
   });
 
   test('global activity response includes additive USD valuation fields', async () => {

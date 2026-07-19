@@ -2,8 +2,9 @@ import { listGlobalActivity, listWalletEvents } from './events.service.js';
 
 export async function getWalletEvents(req, res) {
   const { walletId } = req.validated.params;
+  const { groupTransactions } = req.validated.query;
   const userId = req.auth.user.id;
-  const events = await listWalletEvents(walletId, userId);
+  const events = await listWalletEvents(walletId, userId, { groupTransactions });
 
   res.status(200).json({
     data: events

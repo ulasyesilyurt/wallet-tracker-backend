@@ -28,28 +28,38 @@ function hasPositiveAmount(event) {
   );
 }
 
-function isNftMintOrBurn(event) {
-  if (!isNftTransfer(event)) {
-    return false;
-  }
+function isZeroAddress(address) {
+  return ZERO_ADDRESS_PATTERN.test(address ?? '');
+}
 
+function isNftMint(event) {
   return (
-    (event.direction === 'incoming' && ZERO_ADDRESS_PATTERN.test(event.fromAddress ?? '')) ||
-    (event.direction === 'outgoing' && ZERO_ADDRESS_PATTERN.test(event.toAddress ?? ''))
+    isNftTransfer(event) &&
+    event.direction === 'incoming' &&
+    isZeroAddress(event.fromAddress)
+  );
+}
+
+function isNftBurn(event) {
+  return (
+    isNftTransfer(event) &&
+    event.direction === 'outgoing' &&
+    isZeroAddress(event.toAddress)
   );
 }
 
 function classifyNftActivity(events) {
-  if (events.length < 2) {
+  if (events.length === 0) {
     return null;
   }
 
   if (
     events.some(
       (event) =>
+        !event.transactionHash ||
         !isKnownDirection(event) ||
         (!isFungibleTransfer(event) && !isNftTransfer(event)) ||
-        isNftMintOrBurn(event)
+        isNftBurn(event)
     )
   ) {
     return null;
@@ -81,6 +91,31 @@ function classifyNftActivity(events) {
       incomingNfts.length !==
     events.length
   ) {
+    return null;
+  }
+
+  const mintedNfts = incomingNfts.filter(isNftMint);
+  const hasMintedNfts = mintedNfts.length > 0;
+  const hasMixedMintSources =
+    hasMintedNfts && mintedNfts.length !== incomingNfts.length;
+
+  if (hasMixedMintSources) {
+    return null;
+  }
+
+  if (
+    hasMintedNfts &&
+    outgoingNfts.length === 0 &&
+    incomingPayments.length === 0
+  ) {
+    return {
+      activityType: 'nft_mint',
+      paymentEvents: outgoingPayments
+    };
+  }
+
+  // Any remaining zero-address NFT combination is ambiguous rather than a purchase.
+  if (hasMintedNfts) {
     return null;
   }
 
@@ -129,6 +164,10 @@ function mapAssetLeg(event) {
 }
 
 function sumPaymentUsdValue(paymentEvents) {
+  if (paymentEvents.length === 0) {
+    return null;
+  }
+
   const values = paymentEvents.map((event) => {
     if (event.usdValue === null || event.usdValue === undefined) {
       return null;

@@ -5,6 +5,7 @@ import {
   buildWalletEventNotificationData
 } from '../src/modules/notifications/notificationCopy.js';
 import { buildSafeFirebaseLogMetadata } from '../src/modules/notifications/firebaseLogMetadata.js';
+import { getNotificationPresentation } from '../src/modules/notifications/notificationPresentation.js';
 
 function buildEvent(overrides = {}) {
   return {
@@ -27,6 +28,20 @@ function buildEvent(overrides = {}) {
 }
 
 describe('wallet event notification copy', () => {
+  test('maps raw event types to deterministic alert presentation metadata', () => {
+    assert.deepEqual(getNotificationPresentation(buildEvent()), {
+      category: 'movement',
+      severity: 'warning'
+    });
+    assert.deepEqual(getNotificationPresentation(buildEvent({
+      eventType: 'nft_transfer',
+      assetType: 'nft'
+    })), {
+      category: 'nft',
+      severity: 'info'
+    });
+  });
+
   test('formats incoming native ETH with USD value', () => {
     const copy = buildWalletEventNotificationCopy({
       walletLabel: 'Whale Wallet',

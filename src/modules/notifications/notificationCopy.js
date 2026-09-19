@@ -1,3 +1,5 @@
+import { isNftNotificationEvent } from './notificationPresentation.js';
+
 const amountFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 8
 });
@@ -8,13 +10,6 @@ const usdFormatter = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 0,
   maximumFractionDigits: 2
 });
-
-function isNftEvent(event) {
-  return event.assetType === 'nft'
-    || event.eventType === 'nft_transfer'
-    || event.eventType === 'nft_buy'
-    || event.eventType === 'nft_sell';
-}
 
 function formatAmount(amount) {
   if (amount == null || String(amount).trim() === '') {
@@ -96,7 +91,7 @@ export function buildWalletEventNotificationCopy({ walletLabel, event }) {
   const walletDisplay = resolveWalletDisplay(walletLabel);
   const transferVerb = resolveTransferVerb(event.direction);
 
-  if (isNftEvent(event)) {
+  if (isNftNotificationEvent(event)) {
     return {
       title: `${walletDisplay} ${transferVerb} an NFT`,
       body: resolveNftLabel(event)

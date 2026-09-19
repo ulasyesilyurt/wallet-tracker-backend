@@ -338,6 +338,8 @@ function mapNotificationHistoryRow(row) {
   return {
     id: row.id,
     status: row.status,
+    readAt: row.read_at,
+    isRead: row.read_at != null,
     providerMessageId: row.provider_message_id,
     errorMessage: row.error_message,
     createdAt: row.created_at,
@@ -349,9 +351,14 @@ function mapNotificationHistoryRow(row) {
       walletAddress: row.wallet_address,
       transactionHash: row.transaction_hash,
       eventType: row.event_type,
+      assetType: row.asset_type,
+      assetName: row.asset_name,
       direction: row.direction,
       assetSymbol: row.asset_symbol,
       amount: row.amount != null ? row.amount.toString() : null,
+      nftTokenId: row.nft_token_id,
+      usdValue: row.usd_value != null ? row.usd_value.toString() : null,
+      usdValueStatus: row.usd_value_status,
       fromAddress: row.from_address,
       toAddress: row.to_address,
       chainId: row.chain_id,
@@ -368,6 +375,7 @@ export async function listNotificationDeliveriesByUserId(userId, { limit, offset
         nd.id,
         nd.wallet_event_id,
         nd.status,
+        nd.read_at,
         nd.provider_message_id,
         nd.error_message,
         nd.created_at,
@@ -376,9 +384,14 @@ export async function listNotificationDeliveriesByUserId(userId, { limit, offset
         we.chain_id,
         we.transaction_hash,
         we.event_type,
+        we.asset_type,
+        we.asset_name,
         we.direction,
         we.asset_symbol,
         we.amount,
+        we.nft_token_id,
+        we.usd_value,
+        we.usd_value_status,
         we.from_address,
         we.to_address,
         we.created_at AS wallet_event_created_at,
@@ -389,7 +402,7 @@ export async function listNotificationDeliveriesByUserId(userId, { limit, offset
       INNER JOIN device_tokens dt ON dt.id = nd.device_token_id
       INNER JOIN wallet_events we ON we.id = nd.wallet_event_id
       INNER JOIN tracked_wallets tw ON tw.id = we.wallet_id
-      WHERE dt.user_id = $1
+      WHERE tw.user_id = $1
       ORDER BY nd.created_at DESC, nd.id DESC
       LIMIT $2
       OFFSET $3
@@ -407,4 +420,59 @@ export async function listNotificationDeliveriesByUserId(userId, { limit, offset
       hasMore: result.rowCount === limit
     }
   };
+}
+
+export async function countUnreadNotificationDeliveriesByUserId(userId) {
+  const result = await query(
+    `
+      SELECT COUNT(*)::int AS count
+      FROM notification_deliveries nd
+      INNER JOIN wallet_events we ON we.id = nd.wallet_event_id
+      INNER JOIN tracked_wallets tw ON tw.id = we.wallet_id
+      WHERE tw.user_id = $1
+        AND nd.read_at IS NULL
+    `,
+    [userId]
+  );
+
+  return result.rows[0]?.count ?? 0;
+}
+
+export async function markNotificationDeliveryReadById(notificationId, userId) {
+  const result = await query(
+    `
+      UPDATE notification_deliveries nd
+      SET read_at = COALESCE(nd.read_at, NOW()),
+          updated_at = NOW()
+      FROM wallet_events we, tracked_wallets tw
+      WHERE nd.id = $1
+        AND we.id = nd.wallet_event_id
+        AND tw.id = we.wallet_id
+        AND tw.user_id = $2
+      RETURNING nd.id, nd.read_at
+    `,
+    [notificationId, userId]
+  );
+
+  return result.rows[0]
+    ? { id: result.rows[0].id, readAt: result.rows[0].read_at }
+    : null;
+}
+
+export async function markAllNotificationDeliveriesReadByUserId(userId) {
+  const result = await query(
+    `
+      UPDATE notification_deliveries nd
+      SET read_at = NOW(),
+          updated_at = NOW()
+      FROM wallet_events we, tracked_wallets tw
+      WHERE we.id = nd.wallet_event_id
+        AND tw.id = we.wallet_id
+        AND tw.user_id = $1
+        AND nd.read_at IS NULL
+    `,
+    [userId]
+  );
+
+  return result.rowCount;
 }

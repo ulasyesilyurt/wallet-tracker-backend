@@ -2,9 +2,12 @@ import { logger } from '../../config/logger.js';
 import { env } from '../../config/env.js';
 import {
   claimNotificationOutboxJobs,
+  countUnreadNotificationDeliveriesByUserId,
   getWalletEventNotificationContext,
   listActiveDeviceTokensByUserId,
   listNotificationDeliveriesByUserId,
+  markAllNotificationDeliveriesReadByUserId,
+  markNotificationDeliveryReadById,
   markNotificationOutboxFailed,
   markNotificationOutboxSent,
   scheduleNotificationOutboxRetry,
@@ -16,6 +19,8 @@ import {
   buildWalletEventNotificationData
 } from './notificationCopy.js';
 import { buildSafeFirebaseLogMetadata } from './firebaseLogMetadata.js';
+import { getNotificationPresentation } from './notificationPresentation.js';
+import { HttpError } from '../../utils/httpError.js';
 
 const notificationsLogger = logger.child({ module: 'wallet-event-notifications' });
 
@@ -27,6 +32,7 @@ export const NOTIFICATION_OUTBOX_STALE_PROCESSING_MS = 5 * 60 * 1000;
 
 function buildNotificationMessage({ walletLabel, event, fcmToken }) {
   const { title, body } = buildWalletEventNotificationCopy({ walletLabel, event });
+  const { category, severity } = getNotificationPresentation(event);
 
   return {
     token: fcmToken,
@@ -46,7 +52,12 @@ function buildNotificationMessage({ walletLabel, event, fcmToken }) {
         visibility: 'PUBLIC'
       }
     },
-    data: buildWalletEventNotificationData(event)
+    data: {
+      ...buildWalletEventNotificationData(event),
+      type: String(event.eventType),
+      category,
+      severity
+    }
   };
 }
 
@@ -278,5 +289,51 @@ export async function processNotificationOutboxBatch({
 }
 
 export async function listNotificationHistory(userId, { limit, offset }) {
-  return listNotificationDeliveriesByUserId(userId, { limit, offset });
+  const result = await listNotificationDeliveriesByUserId(userId, { limit, offset });
+
+  return {
+    ...result,
+    items: result.items.map((item) => {
+      const event = item.walletEvent;
+      const { title, body } = buildWalletEventNotificationCopy({
+        walletLabel: event.walletLabel,
+        event
+      });
+      const { category, severity } = getNotificationPresentation(event);
+
+      return {
+        ...item,
+        walletId: event.walletId,
+        chainId: event.chainId,
+        type: event.eventType,
+        category,
+        severity,
+        title,
+        body,
+        relatedEventId: event.id,
+        transactionHash: event.transactionHash
+      };
+    })
+  };
+}
+
+export async function getUnreadNotificationCount(userId) {
+  return countUnreadNotificationDeliveriesByUserId(userId);
+}
+
+export async function markNotificationRead(notificationId, userId) {
+  const notification = await markNotificationDeliveryReadById(notificationId, userId);
+
+  if (!notification) {
+    throw new HttpError(404, 'NOTIFICATION_NOT_FOUND', 'Notification not found.');
+  }
+
+  return {
+    ...notification,
+    isRead: true
+  };
+}
+
+export async function markAllNotificationsRead(userId) {
+  return markAllNotificationDeliveriesReadByUserId(userId);
 }

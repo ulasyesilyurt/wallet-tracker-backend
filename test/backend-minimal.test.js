@@ -156,6 +156,75 @@ async function clearWalletEventArtifacts() {
   await query('DELETE FROM wallet_events WHERE wallet_id = $1', [wallet.id]);
 }
 
+async function seedNotificationDelivery({
+  eventType = 'native_transfer',
+  assetType = 'coin',
+  assetSymbol = 'ETH',
+  assetName = 'Ethereum',
+  status = 'delivered'
+} = {}) {
+  const walletEventId = randomUUID();
+  const notificationId = randomUUID();
+  const transactionHash = `0x${randomUUID().replaceAll('-', '').padEnd(64, '0').slice(0, 64)}`;
+  const deviceTokenId = randomUUID();
+  const fcmToken = `notification-test-${ownerUser.id}`;
+
+  const deviceResult = await query(
+    `
+      INSERT INTO device_tokens (id, user_id, fcm_token, platform, is_active)
+      VALUES ($1, $2, $3, 'ios', TRUE)
+      ON CONFLICT (fcm_token)
+      DO UPDATE SET user_id = EXCLUDED.user_id, is_active = TRUE
+      RETURNING id
+    `,
+    [deviceTokenId, ownerUser.id, fcmToken]
+  );
+
+  await query(
+    `
+      INSERT INTO wallet_events (
+        id, wallet_id, chain_id, transaction_hash, event_type, asset_type,
+        asset_symbol, asset_name, amount, direction, from_address, to_address,
+        usd_value, usd_value_status, occurred_at, explorer_url, raw_payload
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, 1, 'incoming',
+        '0x2222222222222222222222222222222222222222', $9,
+        $10, $11, NOW(), $12, '{}'::jsonb
+      )
+    `,
+    [
+      walletEventId,
+      wallet.id,
+      wallet.chainId,
+      transactionHash,
+      eventType,
+      assetType,
+      assetSymbol,
+      assetName,
+      wallet.address.toLowerCase(),
+      assetType === 'nft' ? null : 250,
+      assetType === 'nft' ? 'unsupported_nft' : 'priced_native_eth',
+      `https://etherscan.io/tx/${transactionHash}`
+    ]
+  );
+
+  await query(
+    `
+      INSERT INTO notification_deliveries (
+        id, wallet_event_id, device_token_id, status, sent_at
+      )
+      VALUES (
+        $1, $2, $3, $4::event_status,
+        CASE WHEN $4::text = 'delivered' THEN NOW() ELSE NULL END
+      )
+    `,
+    [notificationId, walletEventId, deviceResult.rows[0].id, status]
+  );
+
+  return { notificationId, walletEventId, transactionHash };
+}
+
 async function seedWalletAlertSettings({
   minimumAlertUsd = 100,
   notificationsEnabled = true,
@@ -353,6 +422,132 @@ describe('wallet data authorization', () => {
       assert.equal(response.body.error.code, 'WALLET_NOT_FOUND');
     });
   }
+});
+
+describe('notification history api', () => {
+  test('requires authentication for history and unread state endpoints', async () => {
+    const historyResponse = await request.get('/api/v1/notifications');
+    const countResponse = await request.get('/api/v1/notifications/unread-count');
+    const readAllResponse = await request.patch('/api/v1/notifications/read-all');
+
+    assert.equal(historyResponse.status, 401);
+    assert.equal(countResponse.status, 401);
+    assert.equal(readAllResponse.status, 401);
+  });
+
+  test('exposes additive alert metadata while preserving history pagination', async () => {
+    await clearWalletEventArtifacts();
+    const first = await seedNotificationDelivery();
+    await seedNotificationDelivery();
+    await seedNotificationDelivery({
+      eventType: 'nft_transfer',
+      assetType: 'nft',
+      assetSymbol: 'TEST',
+      assetName: 'Test Collection'
+    });
+
+    const firstPage = await request
+      .get('/api/v1/notifications?limit=2&offset=0')
+      .set('Authorization', `Bearer ${ownerToken}`);
+    const secondPage = await request
+      .get('/api/v1/notifications?limit=2&offset=2')
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(firstPage.status, 200);
+    assert.equal(firstPage.body.data.items.length, 2);
+    assert.equal(firstPage.body.data.pagination.limit, 2);
+    assert.equal(firstPage.body.data.pagination.offset, 0);
+    assert.equal(firstPage.body.data.pagination.hasMore, true);
+    assert.equal(secondPage.status, 200);
+    assert.equal(secondPage.body.data.items.length, 1);
+    assert.equal(secondPage.body.data.pagination.hasMore, false);
+
+    const items = [...firstPage.body.data.items, ...secondPage.body.data.items];
+    const movement = items.find((item) => item.relatedEventId === first.walletEventId);
+    const nft = items.find((item) => item.type === 'nft_transfer');
+
+    assert.ok(movement);
+    assert.equal(movement.walletId, wallet.id);
+    assert.equal(movement.chainId, wallet.chainId);
+    assert.equal(movement.type, 'native_transfer');
+    assert.equal(movement.category, 'movement');
+    assert.equal(movement.severity, 'warning');
+    assert.equal(movement.transactionHash, first.transactionHash);
+    assert.equal(movement.isRead, false);
+    assert.equal(movement.readAt, null);
+    assert.equal(movement.status, 'delivered');
+    assert.equal(movement.walletEvent.id, first.walletEventId);
+    assert.equal(typeof movement.title, 'string');
+    assert.equal(typeof movement.body, 'string');
+    assert.equal(nft.category, 'nft');
+    assert.equal(nft.severity, 'info');
+  });
+
+  test('counts unread notifications and marks one notification read idempotently', async () => {
+    await clearWalletEventArtifacts();
+    const first = await seedNotificationDelivery();
+    await seedNotificationDelivery();
+
+    const initialCount = await request
+      .get('/api/v1/notifications/unread-count')
+      .set('Authorization', `Bearer ${ownerToken}`);
+    const readResponse = await request
+      .patch(`/api/v1/notifications/${first.notificationId}/read`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    const repeatedReadResponse = await request
+      .patch(`/api/v1/notifications/${first.notificationId}/read`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    const finalCount = await request
+      .get('/api/v1/notifications/unread-count')
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(initialCount.body.data.unreadCount, 2);
+    assert.equal(readResponse.status, 200);
+    assert.equal(readResponse.body.data.id, first.notificationId);
+    assert.equal(readResponse.body.data.isRead, true);
+    assert.ok(readResponse.body.data.readAt);
+    assert.equal(repeatedReadResponse.status, 200);
+    assert.equal(repeatedReadResponse.body.data.readAt, readResponse.body.data.readAt);
+    assert.equal(finalCount.body.data.unreadCount, 1);
+  });
+
+  test('prevents cross-user read changes', async () => {
+    await clearWalletEventArtifacts();
+    const notification = await seedNotificationDelivery();
+
+    const readResponse = await request
+      .patch(`/api/v1/notifications/${notification.notificationId}/read`)
+      .set('Authorization', `Bearer ${nonOwnerToken}`);
+    const readAllResponse = await request
+      .patch('/api/v1/notifications/read-all')
+      .set('Authorization', `Bearer ${nonOwnerToken}`);
+    const ownerCount = await request
+      .get('/api/v1/notifications/unread-count')
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(readResponse.status, 404);
+    assert.equal(readResponse.body.error.code, 'NOTIFICATION_NOT_FOUND');
+    assert.equal(readAllResponse.status, 200);
+    assert.equal(readAllResponse.body.data.updatedCount, 0);
+    assert.equal(ownerCount.body.data.unreadCount, 1);
+  });
+
+  test('marks all and only the authenticated user notifications read', async () => {
+    await clearWalletEventArtifacts();
+    await seedNotificationDelivery();
+    await seedNotificationDelivery();
+
+    const response = await request
+      .patch('/api/v1/notifications/read-all')
+      .set('Authorization', `Bearer ${ownerToken}`);
+    const countResponse = await request
+      .get('/api/v1/notifications/unread-count')
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.data.updatedCount, 2);
+    assert.equal(countResponse.body.data.unreadCount, 0);
+  });
 });
 
 describe('wallet alert settings api', () => {

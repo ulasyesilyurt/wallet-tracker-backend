@@ -21,8 +21,8 @@ The backend is split into small layers so blockchain ingestion and push delivery
 2. Alchemy webhooks deliver address activity to the backend as the primary production ingestion path for real-time notifications.
 3. The webhook layer validates the payload, normalizes native/token/NFT transfers, and stores them in `wallet_events`.
 4. The Ethereum tracker can still poll confirmed blocks as an optional fallback/debug path when needed.
-5. A notification worker resolves active `device_tokens` for the wallet owner and sends Firebase Cloud Messaging pushes.
-6. Delivery results are recorded in `notification_deliveries` for retries, auditability, and debugging.
+5. A notification worker creates one durable `notifications` row per alert-worthy wallet event, even when the owner has no active device tokens.
+6. The worker sends Firebase Cloud Messaging pushes to active devices and records each attempt in `notification_deliveries` for audit and debugging. Read state belongs to the logical notification.
 
 ### Recommended operating mode
 
@@ -49,6 +49,7 @@ Core tables:
 - `tracked_wallets`: wallet addresses a user wants to monitor
 - `wallet_track_preferences`: per-wallet event subscriptions such as token transfers or NFT sales
 - `wallet_events`: normalized blockchain events ready for display and notification
+- `notifications`: one logical alert per wallet event, including read state
 - `notification_deliveries`: FCM delivery attempts and status
 - `chain_sync_state`: persisted block cursor so the Ethereum tracker can resume safely after restarts
 

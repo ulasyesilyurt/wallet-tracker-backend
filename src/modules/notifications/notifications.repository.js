@@ -47,6 +47,7 @@ export async function listActiveDeviceTokensByUserId(userId) {
 }
 
 export async function upsertNotificationDelivery({
+  notificationId,
   walletEventId,
   deviceTokenId,
   status,
@@ -58,6 +59,7 @@ export async function upsertNotificationDelivery({
   await query(
     `
       INSERT INTO notification_deliveries (
+        notification_id,
         wallet_event_id,
         device_token_id,
         status,
@@ -66,17 +68,33 @@ export async function upsertNotificationDelivery({
         sent_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
       ON CONFLICT (wallet_event_id, device_token_id)
       DO UPDATE SET
+        notification_id = EXCLUDED.notification_id,
         status = EXCLUDED.status,
         provider_message_id = EXCLUDED.provider_message_id,
         error_message = EXCLUDED.error_message,
         sent_at = EXCLUDED.sent_at,
         updated_at = NOW()
     `,
-    [walletEventId, deviceTokenId, status, providerMessageId, errorMessage, sentAt]
+    [notificationId, walletEventId, deviceTokenId, status, providerMessageId, errorMessage, sentAt]
   );
+}
+
+export async function ensureNotificationForWalletEvent(walletEventId) {
+  const result = await query(
+    `
+      INSERT INTO notifications (wallet_event_id)
+      VALUES ($1)
+      ON CONFLICT (wallet_event_id) DO UPDATE
+      SET wallet_event_id = EXCLUDED.wallet_event_id
+      RETURNING id
+    `,
+    [walletEventId]
+  );
+
+  return result.rows[0].id;
 }
 
 export async function enqueueNotificationOutbox(client, walletEventId) {
@@ -368,18 +386,27 @@ function mapNotificationHistoryRow(row) {
   };
 }
 
-export async function listNotificationDeliveriesByUserId(userId, { limit, offset }) {
+export async function listNotificationsByUserId(userId, { limit, offset }) {
   const result = await query(
     `
+      WITH page AS MATERIALIZED (
+        SELECT n.id, n.wallet_event_id, n.read_at, n.created_at
+        FROM notifications n
+        INNER JOIN wallet_events we ON we.id = n.wallet_event_id
+        INNER JOIN tracked_wallets tw ON tw.id = we.wallet_id
+        WHERE tw.user_id = $1
+        ORDER BY n.created_at DESC, n.id DESC
+        LIMIT $2 OFFSET $3
+      )
       SELECT
-        nd.id,
-        nd.wallet_event_id,
-        nd.status,
-        nd.read_at,
-        nd.provider_message_id,
-        nd.error_message,
-        nd.created_at,
-        nd.sent_at,
+        n.id,
+        n.wallet_event_id,
+        n.read_at,
+        n.created_at,
+        COALESCE(delivery.status::text, CASE WHEN no.status = 'sent' THEN 'failed' ELSE 'pending' END) AS status,
+        delivery.provider_message_id,
+        COALESCE(delivery.error_message, CASE WHEN no.status = 'sent' AND delivery.status IS NULL THEN 'no_active_device_tokens' ELSE NULL END) AS error_message,
+        delivery.sent_at,
         we.wallet_id,
         we.chain_id,
         we.transaction_hash,
@@ -398,14 +425,19 @@ export async function listNotificationDeliveriesByUserId(userId, { limit, offset
         we.occurred_at,
         tw.label AS wallet_label,
         tw.address AS wallet_address
-      FROM notification_deliveries nd
-      INNER JOIN device_tokens dt ON dt.id = nd.device_token_id
-      INNER JOIN wallet_events we ON we.id = nd.wallet_event_id
+      FROM page n
+      INNER JOIN wallet_events we ON we.id = n.wallet_event_id
       INNER JOIN tracked_wallets tw ON tw.id = we.wallet_id
-      WHERE tw.user_id = $1
-      ORDER BY nd.created_at DESC, nd.id DESC
-      LIMIT $2
-      OFFSET $3
+      LEFT JOIN notification_outbox no ON no.wallet_event_id = n.wallet_event_id
+      LEFT JOIN LATERAL (
+        SELECT nd.status, nd.provider_message_id, nd.error_message, nd.sent_at
+        FROM notification_deliveries nd
+        WHERE nd.notification_id = n.id
+        ORDER BY CASE nd.status WHEN 'delivered' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,
+                 nd.created_at ASC, nd.id ASC
+        LIMIT 1
+      ) delivery ON TRUE
+      ORDER BY n.created_at DESC, n.id DESC
     `,
     [userId, limit, offset]
   );
@@ -422,15 +454,15 @@ export async function listNotificationDeliveriesByUserId(userId, { limit, offset
   };
 }
 
-export async function countUnreadNotificationDeliveriesByUserId(userId) {
+export async function countUnreadNotificationsByUserId(userId) {
   const result = await query(
     `
       SELECT COUNT(*)::int AS count
-      FROM notification_deliveries nd
-      INNER JOIN wallet_events we ON we.id = nd.wallet_event_id
+      FROM notifications n
+      INNER JOIN wallet_events we ON we.id = n.wallet_event_id
       INNER JOIN tracked_wallets tw ON tw.id = we.wallet_id
       WHERE tw.user_id = $1
-        AND nd.read_at IS NULL
+        AND n.read_at IS NULL
     `,
     [userId]
   );
@@ -438,18 +470,21 @@ export async function countUnreadNotificationDeliveriesByUserId(userId) {
   return result.rows[0]?.count ?? 0;
 }
 
-export async function markNotificationDeliveryReadById(notificationId, userId) {
+export async function markNotificationReadById(notificationId, userId) {
   const result = await query(
     `
-      UPDATE notification_deliveries nd
-      SET read_at = COALESCE(nd.read_at, NOW()),
+      UPDATE notifications n
+      SET read_at = COALESCE(n.read_at, NOW()),
           updated_at = NOW()
       FROM wallet_events we, tracked_wallets tw
-      WHERE nd.id = $1
-        AND we.id = nd.wallet_event_id
+      WHERE n.id = COALESCE(
+          (SELECT legacy.notification_id FROM notification_deliveries legacy WHERE legacy.id = $1),
+          $1::uuid
+        )
+        AND we.id = n.wallet_event_id
         AND tw.id = we.wallet_id
         AND tw.user_id = $2
-      RETURNING nd.id, nd.read_at
+      RETURNING n.id, n.read_at
     `,
     [notificationId, userId]
   );
@@ -459,17 +494,17 @@ export async function markNotificationDeliveryReadById(notificationId, userId) {
     : null;
 }
 
-export async function markAllNotificationDeliveriesReadByUserId(userId) {
+export async function markAllNotificationsReadByUserId(userId) {
   const result = await query(
     `
-      UPDATE notification_deliveries nd
+      UPDATE notifications n
       SET read_at = NOW(),
           updated_at = NOW()
       FROM wallet_events we, tracked_wallets tw
-      WHERE we.id = nd.wallet_event_id
+      WHERE we.id = n.wallet_event_id
         AND tw.id = we.wallet_id
         AND tw.user_id = $1
-        AND nd.read_at IS NULL
+        AND n.read_at IS NULL
     `,
     [userId]
   );

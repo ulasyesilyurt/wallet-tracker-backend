@@ -2,12 +2,13 @@ import { logger } from '../../config/logger.js';
 import { env } from '../../config/env.js';
 import {
   claimNotificationOutboxJobs,
-  countUnreadNotificationDeliveriesByUserId,
+  countUnreadNotificationsByUserId,
+  ensureNotificationForWalletEvent,
   getWalletEventNotificationContext,
   listActiveDeviceTokensByUserId,
-  listNotificationDeliveriesByUserId,
-  markAllNotificationDeliveriesReadByUserId,
-  markNotificationDeliveryReadById,
+  listNotificationsByUserId,
+  markAllNotificationsReadByUserId,
+  markNotificationReadById,
   markNotificationOutboxFailed,
   markNotificationOutboxSent,
   scheduleNotificationOutboxRetry,
@@ -66,7 +67,7 @@ function buildNotificationOutboxRetryDelayMs(attemptCount) {
   return NOTIFICATION_OUTBOX_RETRY_BASE_DELAY_MS * normalizedAttemptCount;
 }
 
-async function deliverNotificationForDeviceToken({ event, userId, walletLabel, deviceToken }) {
+async function deliverNotificationForDeviceToken({ notificationId, event, userId, walletLabel, deviceToken }) {
   const message = buildNotificationMessage({
     walletLabel,
     event,
@@ -84,6 +85,7 @@ async function deliverNotificationForDeviceToken({ event, userId, walletLabel, d
     }, 'Attempting notification_deliveries upsert before Firebase send');
 
     await upsertNotificationDelivery({
+      notificationId,
       walletEventId: event.id,
       deviceTokenId: deviceToken.id,
       status: 'pending'
@@ -92,6 +94,7 @@ async function deliverNotificationForDeviceToken({ event, userId, walletLabel, d
     const delivery = await sendPushNotification(message);
 
     await upsertNotificationDelivery({
+      notificationId,
       walletEventId: event.id,
       deviceTokenId: deviceToken.id,
       status: delivery.delivered ? 'delivered' : 'failed',
@@ -110,6 +113,7 @@ async function deliverNotificationForDeviceToken({ event, userId, walletLabel, d
     return delivery;
   } catch (error) {
     await upsertNotificationDelivery({
+      notificationId,
       walletEventId: event.id,
       deviceTokenId: deviceToken.id,
       status: 'failed',
@@ -132,7 +136,7 @@ async function deliverNotificationForDeviceToken({ event, userId, walletLabel, d
   }
 }
 
-async function processNotificationOutboxJob(job) {
+export async function processNotificationOutboxJob(job) {
   const context = await getWalletEventNotificationContext(job.walletEventId);
 
   if (!context) {
@@ -153,6 +157,7 @@ async function processNotificationOutboxJob(job) {
     attemptCount: job.attemptCount
   }, 'Processing notification outbox job');
 
+  const notificationId = await ensureNotificationForWalletEvent(context.id);
   const deviceTokens = await listActiveDeviceTokensByUserId(context.userId);
 
   notificationsLogger.info({
@@ -181,6 +186,7 @@ async function processNotificationOutboxJob(job) {
 
   for (const deviceToken of deviceTokens) {
     const delivery = await deliverNotificationForDeviceToken({
+      notificationId,
       event: context,
       userId: context.userId,
       walletLabel: context.walletLabel,
@@ -289,7 +295,7 @@ export async function processNotificationOutboxBatch({
 }
 
 export async function listNotificationHistory(userId, { limit, offset }) {
-  const result = await listNotificationDeliveriesByUserId(userId, { limit, offset });
+  const result = await listNotificationsByUserId(userId, { limit, offset });
 
   return {
     ...result,
@@ -318,11 +324,11 @@ export async function listNotificationHistory(userId, { limit, offset }) {
 }
 
 export async function getUnreadNotificationCount(userId) {
-  return countUnreadNotificationDeliveriesByUserId(userId);
+  return countUnreadNotificationsByUserId(userId);
 }
 
 export async function markNotificationRead(notificationId, userId) {
-  const notification = await markNotificationDeliveryReadById(notificationId, userId);
+  const notification = await markNotificationReadById(notificationId, userId);
 
   if (!notification) {
     throw new HttpError(404, 'NOTIFICATION_NOT_FOUND', 'Notification not found.');
@@ -335,5 +341,5 @@ export async function markNotificationRead(notificationId, userId) {
 }
 
 export async function markAllNotificationsRead(userId) {
-  return markAllNotificationDeliveriesReadByUserId(userId);
+  return markAllNotificationsReadByUserId(userId);
 }

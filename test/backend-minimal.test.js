@@ -211,8 +211,16 @@ async function seedNotificationDelivery({
 
   await query(
     `
+      INSERT INTO notifications (id, wallet_event_id)
+      VALUES ($1, $2)
+    `,
+    [notificationId, walletEventId]
+  );
+
+  await query(
+    `
       INSERT INTO notification_deliveries (
-        id, wallet_event_id, device_token_id, status, sent_at
+        notification_id, wallet_event_id, device_token_id, status, sent_at
       )
       VALUES (
         $1, $2, $3, $4::event_status,

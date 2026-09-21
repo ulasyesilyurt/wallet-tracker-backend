@@ -115,6 +115,28 @@ Signed deliveries must include a configured Ethereum or Base `webhookId`, its ma
 network, and the `X-Alchemy-Signature` generated with that webhook's signing secret.
 This endpoint remains the primary real-time notification ingestion path.
 
+### Recover Alchemy wallet subscriptions
+
+Wallet create, update, and delete save the database change before synchronizing Alchemy.
+If synchronization fails, the API returns `503` with `ALCHEMY_WEBHOOK_SYNC_FAILED` in
+the existing error envelope. The wallet change was saved; run reconciliation instead
+of assuming the operation was rolled back.
+
+With `ALCHEMY_NOTIFY_API_KEY` and both chain-specific webhook IDs configured, preview
+and then repair Ethereum and Base subscriptions:
+
+```bash
+npm run reconcile:alchemy-webhook-addresses -- --dry-run
+npm run reconcile:alchemy-webhook-addresses
+```
+
+The live command reads every page of each webhook's watched-address list, adds missing
+database addresses, and removes stale addresses only after checking that no active
+wallet still uses that address on the same chain. Logs report planned and completed
+counts per chain. A failed or incomplete address-list response stops changes for that
+chain and exits nonzero. Repeating the command is safe. Legacy watched-address
+overrides apply only to Ethereum dry-runs; live reconciliation always reads Alchemy.
+
 ### Health check
 
 `GET /health`

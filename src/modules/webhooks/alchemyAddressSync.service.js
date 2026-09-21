@@ -11,7 +11,8 @@ const alchemyAddressSyncLogger = logger.child({ module: 'alchemy-address-sync' }
 // This management endpoint is intentionally isolated here so it is easy to adjust
 // if Alchemy's Notify API path or auth header requirements differ by account/docs.
 const ALCHEMY_NOTIFY_UPDATE_WEBHOOK_ADDRESSES_URL = 'https://dashboard.alchemy.com/api/update-webhook-addresses';
-const ALCHEMY_NOTIFY_GET_WEBHOOK_URL = 'https://dashboard.alchemy.com/api/team-webhooks';
+const ALCHEMY_NOTIFY_GET_WEBHOOK_ADDRESSES_URL = 'https://dashboard.alchemy.com/api/webhook-addresses';
+const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 
 function normalizeAddress(address) {
   return typeof address === 'string' ? address.trim().toLowerCase() : '';
@@ -49,19 +50,6 @@ export function getAlchemyAddressActivityWebhookIdForChain(chainId) {
   return getAlchemyAddressActivityWebhookId(chainId);
 }
 
-function buildConfigContext(chainId = ETHEREUM_MAINNET_CHAIN_ID) {
-  const chainConfig = getChainConfigById(chainId);
-  const resolvedWebhookId = getAlchemyAddressActivityWebhookId(chainId);
-
-  return {
-    chainId,
-    hasNotifyApiKey: Boolean(env.ALCHEMY_NOTIFY_API_KEY),
-    webhookEnvVar: chainConfig?.alchemyAddressActivityWebhookEnvVar ?? null,
-    hasWebhookId: Boolean(resolvedWebhookId),
-    webhookId: resolvedWebhookId
-  };
-}
-
 function buildAlchemyHeaders() {
   return {
     'content-type': 'application/json',
@@ -83,30 +71,6 @@ function ensureAlchemyWebhookSyncConfigured(chainId) {
   return webhookId;
 }
 
-function isIdempotentAlchemyAddressSyncFailure(status, responseText) {
-  if (status == null) {
-    return false;
-  }
-
-  const normalized = `${responseText ?? ''}`.toLowerCase();
-
-  if (status === 404 && normalized.includes('not found')) {
-    return true;
-  }
-
-  if ((status === 400 || status === 409 || status === 422) && (
-    normalized.includes('already') ||
-    normalized.includes('exists') ||
-    normalized.includes('duplicate') ||
-    normalized.includes('not found') ||
-    normalized.includes('missing')
-  )) {
-    return true;
-  }
-
-  return false;
-}
-
 async function updateAlchemyWebhookAddresses({ chainId, addressesToAdd = [], addressesToRemove = [] }) {
   const webhookId = ensureAlchemyWebhookSyncConfigured(chainId);
 
@@ -117,7 +81,8 @@ async function updateAlchemyWebhookAddresses({ chainId, addressesToAdd = [], add
       webhook_id: webhookId,
       addresses_to_add: addressesToAdd,
       addresses_to_remove: addressesToRemove
-    })
+    }),
+    signal: AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS)
   });
 
   const responseText = await response.text();
@@ -130,48 +95,6 @@ async function updateAlchemyWebhookAddresses({ chainId, addressesToAdd = [], add
   }
 
   return responseText;
-}
-
-function collectAddressArrays(value, collector) {
-  if (!value || typeof value !== 'object') {
-    return;
-  }
-
-  if (Array.isArray(value)) {
-    if (value.every((item) => typeof item === 'string')) {
-      collector.push(...value);
-      return;
-    }
-
-    for (const item of value) {
-      collectAddressArrays(item, collector);
-    }
-    return;
-  }
-
-  for (const [key, nestedValue] of Object.entries(value)) {
-    if (Array.isArray(nestedValue) && key.toLowerCase().includes('address')) {
-      for (const item of nestedValue) {
-        if (typeof item === 'string') {
-          collector.push(item);
-        } else if (item && typeof item === 'object') {
-          const candidateAddress = item.address ?? item.walletAddress ?? item.value;
-
-          if (typeof candidateAddress === 'string') {
-            collector.push(candidateAddress);
-          }
-        }
-      }
-    }
-
-    collectAddressArrays(nestedValue, collector);
-  }
-}
-
-function extractWatchedAddressesFromWebhookPayload(payload) {
-  const candidates = [];
-  collectAddressArrays(payload, candidates);
-  return [...new Set(candidates.map(normalizeAddress).filter(Boolean))];
 }
 
 function parseWatchedAddressesOverride(rawValue, sourceLabel) {
@@ -228,52 +151,97 @@ async function loadWatchedAddressesOverride() {
   return null;
 }
 
-export async function listAlchemyWebhookWatchedAddresses() {
-  const chainId = ETHEREUM_MAINNET_CHAIN_ID;
+export async function listAlchemyWebhookWatchedAddresses(chainId = ETHEREUM_MAINNET_CHAIN_ID, { allowOverride = false } = {}) {
   const webhookId = ensureAlchemyWebhookSyncConfigured(chainId);
 
-  const overrideAddresses = await loadWatchedAddressesOverride();
+  if (allowOverride && chainId === ETHEREUM_MAINNET_CHAIN_ID) {
+    const overrideAddresses = await loadWatchedAddressesOverride();
 
-  if (overrideAddresses) {
-    return overrideAddresses;
+    if (overrideAddresses) {
+      return overrideAddresses;
+    }
   }
 
-  const response = await fetch(`${ALCHEMY_NOTIFY_GET_WEBHOOK_URL}/${webhookId}`, {
-    method: 'GET',
-    headers: buildAlchemyHeaders()
-  });
-  const responseText = await response.text();
+  const addresses = new Set();
+  const seenCursors = new Set();
+  let after = null;
+  let totalCount = null;
 
-  if (!response.ok) {
-    const error = new Error(`Alchemy webhook address list failed with status ${response.status}`);
-    error.status = response.status;
-    error.responseText = responseText;
-    error.endpoint = `${ALCHEMY_NOTIFY_GET_WEBHOOK_URL}/${webhookId}`;
-    throw error;
+  do {
+    const url = new URL(ALCHEMY_NOTIFY_GET_WEBHOOK_ADDRESSES_URL);
+    url.searchParams.set('webhook_id', webhookId);
+    url.searchParams.set('limit', '100');
+
+    if (after) {
+      url.searchParams.set('after', after);
+    }
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: buildAlchemyHeaders(),
+      signal: AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS)
+    });
+
+    if (!response.ok) {
+      const error = new Error(`Alchemy webhook address list failed with status ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+
+    const payload = await response.json();
+    const pageCount = payload?.pagination?.total_count;
+    const pageAddresses = payload?.data;
+    const nextCursor = payload?.pagination?.cursors?.after ?? null;
+
+    if (!Array.isArray(pageAddresses) || !Number.isInteger(pageCount) || pageCount < 0 ||
+        (nextCursor !== null && (typeof nextCursor !== 'string' || nextCursor.length === 0))) {
+      throw new Error('Alchemy webhook address list returned an invalid response');
+    }
+
+    if (totalCount !== null && totalCount !== pageCount) {
+      throw new Error('Alchemy webhook address count changed during pagination');
+    }
+
+    totalCount = pageCount;
+    const previousAddressCount = addresses.size;
+
+    for (const address of pageAddresses) {
+      if (typeof address !== 'string' || !ADDRESS_PATTERN.test(address)) {
+        throw new Error('Alchemy webhook address list contained an invalid address');
+      }
+
+      addresses.add(address.toLowerCase());
+    }
+
+    if (addresses.size > totalCount) {
+      throw new Error('Alchemy webhook address list exceeded its reported count');
+    }
+
+    if (nextCursor !== null) {
+      if (addresses.size === previousAddressCount || seenCursors.has(nextCursor)) {
+        throw new Error('Alchemy webhook address list pagination did not advance');
+      }
+
+      seenCursors.add(nextCursor);
+    }
+
+    after = nextCursor;
+  } while (after !== null);
+
+  if (addresses.size !== totalCount) {
+    throw new Error('Alchemy webhook address list was incomplete; refusing reconciliation');
   }
-
-  let payload = null;
-
-  try {
-    payload = responseText ? JSON.parse(responseText) : null;
-  } catch (error) {
-    const parseError = new Error('Alchemy webhook address list returned non-JSON response');
-    parseError.status = response.status;
-    parseError.responseText = responseText;
-    throw parseError;
-  }
-
-  const addresses = extractWatchedAddressesFromWebhookPayload(payload);
 
   alchemyAddressSyncLogger.info(
     {
+      chainId,
       webhookId,
-      watchedAddressCount: addresses.length
+      watchedAddressCount: addresses.size
     },
     'Fetched watched addresses from Alchemy webhook'
   );
 
-  return addresses;
+  return [...addresses].sort();
 }
 
 async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }) {
@@ -285,18 +253,10 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
       { chainId, address: normalizedAddress, walletId, reason },
       'Alchemy webhook address sync add skipped for unsupported chain'
     );
-    return;
+    return false;
   }
 
-  const webhookId = getAlchemyAddressActivityWebhookId(chainId);
-
-  if (!env.ALCHEMY_NOTIFY_API_KEY || !webhookId) {
-    alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason, ...buildConfigContext(chainId) },
-      'Alchemy webhook address sync add skipped because configuration is incomplete'
-    );
-    return;
-  }
+  ensureAlchemyWebhookSyncConfigured(chainId);
 
   alchemyAddressSyncLogger.info(
     { chainId, address: normalizedAddress, walletId, reason },
@@ -313,21 +273,8 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
       { chainId, address: normalizedAddress, walletId, reason },
       'Alchemy webhook address sync add succeeded'
     );
+    return true;
   } catch (error) {
-    if (isIdempotentAlchemyAddressSyncFailure(error.status, error.responseText)) {
-      alchemyAddressSyncLogger.info(
-        {
-          chainId,
-          address: normalizedAddress,
-          walletId,
-          reason,
-          status: error.status
-        },
-        'Alchemy webhook address sync add treated as idempotent success'
-      );
-      return;
-    }
-
     alchemyAddressSyncLogger.error(
       {
         err: error,
@@ -339,6 +286,7 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
       },
       'Alchemy webhook address sync add failed'
     );
+    throw error;
   }
 }
 
@@ -351,7 +299,7 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
       { chainId, address: normalizedAddress, walletId, reason },
       'Alchemy webhook address sync remove skipped for unsupported chain'
     );
-    return;
+    return false;
   }
 
   const remainingWalletCount = await countActiveWalletsByChainIdAndAddress(chainId, normalizedAddress);
@@ -367,18 +315,10 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
       },
       'Alchemy webhook address sync remove skipped because address is still used by another wallet'
     );
-    return;
+    return false;
   }
 
-  const webhookId = getAlchemyAddressActivityWebhookId(chainId);
-
-  if (!env.ALCHEMY_NOTIFY_API_KEY || !webhookId) {
-    alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason, ...buildConfigContext(chainId) },
-      'Alchemy webhook address sync remove skipped because configuration is incomplete'
-    );
-    return;
-  }
+  ensureAlchemyWebhookSyncConfigured(chainId);
 
   alchemyAddressSyncLogger.info(
     { chainId, address: normalizedAddress, walletId, reason },
@@ -395,21 +335,8 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
       { chainId, address: normalizedAddress, walletId, reason },
       'Alchemy webhook address sync remove succeeded'
     );
+    return true;
   } catch (error) {
-    if (isIdempotentAlchemyAddressSyncFailure(error.status, error.responseText)) {
-      alchemyAddressSyncLogger.info(
-        {
-          chainId,
-          address: normalizedAddress,
-          walletId,
-          reason,
-          status: error.status
-        },
-        'Alchemy webhook address sync remove treated as idempotent success'
-      );
-      return;
-    }
-
     alchemyAddressSyncLogger.error(
       {
         err: error,
@@ -421,29 +348,46 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
       },
       'Alchemy webhook address sync remove failed'
     );
+    throw error;
+  }
+}
+
+async function runSyncSteps(steps) {
+  const failures = [];
+
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'One or more Alchemy webhook address updates failed');
   }
 }
 
 export async function syncAlchemyWebhookAddressOnWalletCreate(wallet) {
-  for (const chainId of getWalletSyncChains(wallet)) {
-    await addAddressToAlchemyWebhook({
+  await runSyncSteps(getWalletSyncChains(wallet).map((chainId) => () =>
+    addAddressToAlchemyWebhook({
       chainId,
       address: wallet.address,
       walletId: wallet.id,
       reason: 'wallet_created'
-    });
-  }
+    })
+  ));
 }
 
 export async function syncAlchemyWebhookAddressOnWalletDelete(wallet) {
-  for (const chainId of getWalletSyncChains(wallet)) {
-    await removeAddressFromAlchemyWebhookIfUnused({
+  await runSyncSteps(getWalletSyncChains(wallet).map((chainId) => () =>
+    removeAddressFromAlchemyWebhookIfUnused({
       chainId,
       address: wallet.address,
       walletId: wallet.id,
       reason: 'wallet_deleted'
-    });
-  }
+    })
+  ));
 }
 
 export async function syncAlchemyWebhookAddressOnWalletUpdate(previousWallet, updatedWallet) {
@@ -476,93 +420,32 @@ export async function syncAlchemyWebhookAddressOnWalletUpdate(previousWallet, up
 
   const chainsToAdd = addressChanged ? nextChains : chainsAdded;
 
-  for (const chainId of chainsToAdd) {
-    await addAddressToAlchemyWebhook({
+  const addSteps = chainsToAdd.map((chainId) => () =>
+    addAddressToAlchemyWebhook({
       chainId,
       address: updatedWallet.address,
       walletId: updatedWallet.id,
       reason: addressChanged ? 'wallet_address_updated_add_new' : 'wallet_chain_enabled'
-    });
-  }
+    })
+  );
 
   const chainsToRemove = addressChanged ? previousChains : chainsRemoved;
-
-  for (const chainId of chainsToRemove) {
-    await removeAddressFromAlchemyWebhookIfUnused({
+  const removeSteps = chainsToRemove.map((chainId) => () =>
+    removeAddressFromAlchemyWebhookIfUnused({
       chainId,
       address: previousWallet.address,
       walletId: updatedWallet.id,
       reason: addressChanged ? 'wallet_address_updated_remove_old' : 'wallet_chain_disabled'
-    });
-  }
+    })
+  );
+
+  await runSyncSteps([...addSteps, ...removeSteps]);
 }
 
 export async function addAddressToAlchemyWebhookSync({ chainId, address, reason = 'manual_sync', walletId = null }) {
-  await addAddressToAlchemyWebhook({ chainId, address, reason, walletId });
+  return addAddressToAlchemyWebhook({ chainId, address, reason, walletId });
 }
 
 export async function removeAddressFromAlchemyWebhookSync({ chainId, address, reason = 'manual_sync', walletId = null }) {
-  const normalizedAddress = normalizeAddress(address);
-  const chainConfig = getChainConfigById(chainId);
-
-  if (!chainConfig) {
-    alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason },
-      'Alchemy webhook address sync remove skipped for unsupported chain'
-    );
-    return;
-  }
-
-  const webhookId = getAlchemyAddressActivityWebhookId(chainId);
-
-  if (!env.ALCHEMY_NOTIFY_API_KEY || !webhookId) {
-    alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason, ...buildConfigContext(chainId) },
-      'Alchemy webhook address sync remove skipped because configuration is incomplete'
-    );
-    return;
-  }
-
-  alchemyAddressSyncLogger.info(
-    { chainId, address: normalizedAddress, walletId, reason },
-    'Alchemy webhook address sync remove started'
-  );
-
-  try {
-    await updateAlchemyWebhookAddresses({
-      chainId,
-      addressesToRemove: [normalizedAddress]
-    });
-
-    alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason },
-      'Alchemy webhook address sync remove succeeded'
-    );
-  } catch (error) {
-    if (isIdempotentAlchemyAddressSyncFailure(error.status, error.responseText)) {
-      alchemyAddressSyncLogger.info(
-        {
-          chainId,
-          address: normalizedAddress,
-          walletId,
-          reason,
-          status: error.status
-        },
-        'Alchemy webhook address sync remove treated as idempotent success'
-      );
-      return;
-    }
-
-    alchemyAddressSyncLogger.error(
-      {
-        err: error,
-        chainId,
-        address: normalizedAddress,
-        walletId,
-        reason,
-        status: error.status
-      },
-      'Alchemy webhook address sync remove failed'
-    );
-  }
+  return removeAddressFromAlchemyWebhookIfUnused({ chainId, address, reason, walletId });
 }

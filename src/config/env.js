@@ -51,6 +51,7 @@ const envSchema = z.object({
   }, z.boolean()),
   PORTFOLIO_SNAPSHOT_INTERVAL_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
   ALCHEMY_NOTIFY_API_KEY: z.string().optional(),
+  ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID: z.string().optional(),
   ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_ETHEREUM_MAINNET: z.string().optional(),
   ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET: z.string().optional(),

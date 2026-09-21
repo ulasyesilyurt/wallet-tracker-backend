@@ -44,7 +44,13 @@ for (const nodeEnv of ['development', 'production']) {
         DATABASE_URL: 'postgresql://localhost:5432/wallet_tracker_logging_test',
         JWT_SECRET: 'test_jwt_secret_that_is_long_enough_for_logging_checks',
         LOG_LEVEL: 'info',
-        GLOBAL_API_RATE_LIMIT_MAX: '1000'
+        GLOBAL_API_RATE_LIMIT_MAX: '1000',
+        ALCHEMY_NOTIFY_API_KEY: 'test-notify-key',
+        ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_ETHEREUM_MAINNET: 'wh_logging_ethereum',
+        ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET: 'wh_logging_base',
+        ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET: 'test-logging-ethereum-secret',
+        ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET: 'test-logging-base-secret',
+        ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV: 'false'
       }
     });
 

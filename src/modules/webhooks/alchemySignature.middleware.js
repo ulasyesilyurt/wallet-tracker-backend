@@ -2,6 +2,12 @@ import crypto from 'crypto';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { HttpError } from '../../utils/httpError.js';
+import {
+  BASE_MAINNET_CHAIN_ID,
+  ETHEREUM_MAINNET_CHAIN_ID,
+  resolveChainIdFromAlchemyWebhookNetwork
+} from '../chains/chains.config.js';
+import { getAlchemyAddressActivityWebhookIdForChain } from './alchemyAddressSync.service.js';
 
 const webhookSignatureLogger = logger.child({ module: 'alchemy-webhook-signature' });
 const ALCHEMY_SIGNATURE_HEADER = 'x-alchemy-signature';
@@ -31,31 +37,50 @@ function computeAlchemySignature(rawBody, signingSecret) {
     .digest('hex');
 }
 
-function isDevelopmentSkipAllowed() {
-  return env.NODE_ENV === 'development' && !env.ALCHEMY_WEBHOOK_SIGNING_SECRET;
+function getSigningSecretForChain(chainId) {
+  if (chainId === ETHEREUM_MAINNET_CHAIN_ID) {
+    return env.ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET ?? env.ALCHEMY_WEBHOOK_SIGNING_SECRET;
+  }
+
+  if (chainId === BASE_MAINNET_CHAIN_ID) {
+    return env.ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET;
+  }
+
+  return null;
+}
+
+function getConfiguredWebhook(req) {
+  const webhookId = req.body?.webhookId;
+
+  if (typeof webhookId !== 'string') {
+    return null;
+  }
+
+  // The unverified ID only selects from configured webhook identities; the HMAC
+  // and signed network must both match before the request reaches the handler.
+  const matches = [ETHEREUM_MAINNET_CHAIN_ID, BASE_MAINNET_CHAIN_ID]
+    .filter((chainId) => getAlchemyAddressActivityWebhookIdForChain(chainId) === webhookId);
+
+  if (matches.length !== 1) {
+    return null;
+  }
+
+  const chainId = matches[0];
+  const signingSecret = getSigningSecretForChain(chainId);
+
+  return signingSecret?.trim() ? { chainId, signingSecret } : null;
 }
 
 export function verifyAlchemyWebhookSignature(req, res, next) {
-  if (isDevelopmentSkipAllowed()) {
+  if (env.NODE_ENV !== 'production' && env.ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV) {
     webhookSignatureLogger.warn(
       {
         path: req.originalUrl,
         nodeEnv: env.NODE_ENV
       },
-      'Alchemy webhook signature verification skipped in development because secret is unset'
+      'Alchemy webhook signature verification explicitly skipped for local testing'
     );
     return next();
-  }
-
-  if (!env.ALCHEMY_WEBHOOK_SIGNING_SECRET) {
-    return next(
-      new HttpError(
-        500,
-        'WEBHOOK_SIGNATURE_NOT_CONFIGURED',
-        'Alchemy webhook signing secret is not configured.',
-        { expose: false }
-      )
-    );
   }
 
   const providedSignature = normalizeSignature(req.get(ALCHEMY_SIGNATURE_HEADER));
@@ -86,9 +111,16 @@ export function verifyAlchemyWebhookSignature(req, res, next) {
     );
   }
 
+  const configuredWebhook = getConfiguredWebhook(req);
+
+  if (!configuredWebhook) {
+    webhookSignatureLogger.warn({ path: req.originalUrl }, 'Alchemy webhook ID is not configured');
+    return next(new HttpError(403, 'WEBHOOK_ID_INVALID', 'Unknown Alchemy webhook.'));
+  }
+
   const expectedSignature = computeAlchemySignature(
     req.rawBody,
-    env.ALCHEMY_WEBHOOK_SIGNING_SECRET
+    configuredWebhook.signingSecret
   );
   const providedBuffer = Buffer.from(providedSignature, 'utf8');
   const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
@@ -107,9 +139,15 @@ export function verifyAlchemyWebhookSignature(req, res, next) {
     return next(new HttpError(403, 'WEBHOOK_SIGNATURE_INVALID', 'Invalid Alchemy webhook signature.'));
   }
 
+  if (resolveChainIdFromAlchemyWebhookNetwork(req.body?.event?.network) !== configuredWebhook.chainId) {
+    webhookSignatureLogger.warn({ path: req.originalUrl }, 'Alchemy webhook network does not match its ID');
+    return next(new HttpError(403, 'WEBHOOK_NETWORK_MISMATCH', 'Alchemy webhook network does not match its ID.'));
+  }
+
   webhookSignatureLogger.info(
     {
-      path: req.originalUrl
+      path: req.originalUrl,
+      chainId: configuredWebhook.chainId
     },
     'Alchemy webhook signature verified'
   );

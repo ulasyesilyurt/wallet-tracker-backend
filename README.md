@@ -111,6 +111,8 @@ Returns normalized wallet events sorted by newest first.
 `POST /webhooks/alchemy`
 
 Accepts Alchemy Address Activity webhook payloads and stores matching wallet activity in `wallet_events`.
+Signed deliveries must include a configured Ethereum or Base `webhookId`, its matching
+network, and the `X-Alchemy-Signature` generated with that webhook's signing secret.
 This endpoint remains the primary real-time notification ingestion path.
 
 ### Health check
@@ -235,6 +237,11 @@ With dry-run enabled, you should still see delivery rows being written, which co
 - confirm the push appears on the device
 
 ### Test the Alchemy webhook locally
+
+For this unsigned local example only, set `ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV=true` with
+`NODE_ENV=development`. Production requires separate Ethereum and Base webhook IDs and
+signing secrets and will reject the unsigned setting. Real Alchemy deliveries must use
+the configured webhook ID and that webhook's `X-Alchemy-Signature`.
 
 1. Start the API:
 

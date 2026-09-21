@@ -59,6 +59,12 @@ const envSchema = z.object({
   ALCHEMY_ETHEREUM_RPC_URL: z.string().optional(),
   ALCHEMY_BASE_RPC_URL: z.string().optional(),
   ALCHEMY_WEBHOOK_SIGNING_SECRET: z.string().optional(),
+  ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET: z.string().optional(),
+  ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET: z.string().optional(),
+  ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV: z.preprocess(
+    (value) => value === 'true' || value === true,
+    z.boolean()
+  ),
   ETHEREUM_RPC_URL: z.string().optional(),
   ETHEREUM_CONFIRMATIONS: z.coerce.number().int().min(0).default(6),
   ETHEREUM_BATCH_SIZE: z.coerce.number().int().positive().max(2_000).default(250),
@@ -96,6 +102,56 @@ const envSchema = z.object({
   ETHEREUM_TRACE_FROM_ADDRESS: z.string().optional(),
   ETHEREUM_TRACE_TO_ADDRESS: z.string().optional(),
   ETHEREUM_TRACE_TX_HASH: z.string().optional()
+}).superRefine((config, context) => {
+  if (config.NODE_ENV !== 'production') {
+    return;
+  }
+
+  for (const key of [
+    'ALCHEMY_NOTIFY_API_KEY',
+    'ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_ETHEREUM_MAINNET',
+    'ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET',
+    'ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET',
+    'ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET'
+  ]) {
+    if (!config[key]?.trim()) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} is required in production`
+      });
+    }
+  }
+
+  if (config.ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV'],
+      message: 'Unsigned Alchemy webhooks are not allowed in production'
+    });
+  }
+
+  if (
+    config.ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_ETHEREUM_MAINNET &&
+    config.ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_ETHEREUM_MAINNET === config.ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET'],
+      message: 'Ethereum and Base webhook IDs must be different'
+    });
+  }
+
+  if (
+    config.ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET &&
+    config.ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET === config.ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET'],
+      message: 'Ethereum and Base webhook signing secrets must be different'
+    });
+  }
 });
 
 export const env = envSchema.parse(process.env);

@@ -6,15 +6,18 @@ import {
   ensureNotificationForWalletEvent,
   getWalletEventNotificationContext,
   listActiveDeviceTokensByUserId,
+  listNotificationDeliveryStates,
   listNotificationsByUserId,
   markAllNotificationsReadByUserId,
   markNotificationReadById,
   markNotificationOutboxFailed,
   markNotificationOutboxSent,
+  recordInvalidTokenDelivery,
   scheduleNotificationOutboxRetry,
   upsertNotificationDelivery
 } from './notifications.repository.js';
 import { sendPushNotification } from './firebase.service.js';
+import { classifyFirebaseDeliveryError } from './firebaseDeliveryErrors.js';
 import {
   buildWalletEventNotificationCopy,
   buildWalletEventNotificationData
@@ -67,76 +70,111 @@ function buildNotificationOutboxRetryDelayMs(attemptCount) {
   return NOTIFICATION_OUTBOX_RETRY_BASE_DELAY_MS * normalizedAttemptCount;
 }
 
-async function deliverNotificationForDeviceToken({ notificationId, event, userId, walletLabel, deviceToken }) {
+async function deliverNotificationForDeviceToken({ notificationId, event, userId, walletLabel, deviceToken, sendPush }) {
   const message = buildNotificationMessage({
     walletLabel,
     event,
     fcmToken: deviceToken.fcmToken
   });
 
+  notificationsLogger.info({
+    deviceTokenId: deviceToken.id,
+    userId,
+    deliveryStatus: 'pending',
+    ...buildSafeFirebaseLogMetadata(message),
+    androidPriority: message.android?.priority,
+    androidChannelId: message.android?.notification?.channelId
+  }, 'Attempting notification_deliveries upsert before Firebase send');
+
+  const reserved = await upsertNotificationDelivery({
+    notificationId,
+    walletEventId: event.id,
+    deviceTokenId: deviceToken.id,
+    status: 'pending',
+    retryable: true
+  });
+
+  if (!reserved) {
+    return { delivered: true, alreadyDelivered: true, retryable: false };
+  }
+
+  let delivery;
+
   try {
-    notificationsLogger.info({
-      deviceTokenId: deviceToken.id,
-      userId,
-      deliveryStatus: 'pending',
-      ...buildSafeFirebaseLogMetadata(message),
-      androidPriority: message.android?.priority,
-      androidChannelId: message.android?.notification?.channelId
-    }, 'Attempting notification_deliveries upsert before Firebase send');
-
-    await upsertNotificationDelivery({
-      notificationId,
-      walletEventId: event.id,
-      deviceTokenId: deviceToken.id,
-      status: 'pending'
-    });
-
-    const delivery = await sendPushNotification(message);
-
-    await upsertNotificationDelivery({
-      notificationId,
-      walletEventId: event.id,
-      deviceTokenId: deviceToken.id,
-      status: delivery.delivered ? 'delivered' : 'failed',
-      providerMessageId: delivery.providerMessageId ?? null,
-      errorMessage: delivery.skipped ? delivery.reason : null
-    });
-
-    notificationsLogger.info({
-      deviceTokenId: deviceToken.id,
-      userId,
-      delivered: delivery.delivered,
-      skipped: delivery.skipped ?? false,
-      providerMessageId: delivery.providerMessageId ?? null
-    }, 'notification_deliveries upserted after Firebase send');
-
-    return delivery;
+    delivery = await sendPush(message);
   } catch (error) {
-    await upsertNotificationDelivery({
-      notificationId,
-      walletEventId: event.id,
-      deviceTokenId: deviceToken.id,
-      status: 'failed',
-      errorMessage: error.message
-    });
+    const failure = classifyFirebaseDeliveryError(error);
 
-    notificationsLogger.error({
+    if (failure.kind === 'invalid_token') {
+      await recordInvalidTokenDelivery({
+        notificationId,
+        walletEventId: event.id,
+        deviceTokenId: deviceToken.id,
+        userId,
+        fcmToken: deviceToken.fcmToken,
+        tokenUpdatedAt: deviceToken.tokenUpdatedAt,
+        errorMessage: failure.reason
+      });
+    } else {
+      await upsertNotificationDelivery({
+        notificationId,
+        walletEventId: event.id,
+        deviceTokenId: deviceToken.id,
+        status: 'failed',
+        errorMessage: failure.reason,
+        retryable: failure.kind === 'transient'
+      });
+    }
+
+    notificationsLogger.warn({
       deviceTokenId: deviceToken.id,
       userId,
-      errorName: error.name,
-      errorCode: error.code ?? null
-    }, 'Failed to deliver wallet event push notification');
+      failureKind: failure.kind,
+      errorCode: failure.reason
+    }, 'Firebase push delivery failed');
 
     return {
       delivered: false,
       skipped: false,
-      failed: true,
-      errorMessage: error.message
+      retryable: failure.kind === 'transient',
+      invalidToken: failure.kind === 'invalid_token'
     };
   }
+
+  if (delivery.delivered) {
+    await upsertNotificationDelivery({
+      notificationId,
+      walletEventId: event.id,
+      deviceTokenId: deviceToken.id,
+      status: 'delivered',
+      providerMessageId: delivery.providerMessageId ?? null,
+      retryable: false
+    });
+
+    notificationsLogger.info({
+      deviceTokenId: deviceToken.id,
+      userId,
+      delivered: true,
+      providerMessageId: delivery.providerMessageId ?? null
+    }, 'Firebase push delivery recorded');
+
+    return { delivered: true, skipped: false, retryable: false };
+  }
+
+  const retryable = !delivery.skipped;
+  await upsertNotificationDelivery({
+    notificationId,
+    walletEventId: event.id,
+    deviceTokenId: deviceToken.id,
+    status: 'failed',
+    errorMessage: delivery.reason ?? 'firebase_send_unconfirmed',
+    retryable
+  });
+
+  return { delivered: false, skipped: Boolean(delivery.skipped), retryable };
 }
 
-export async function processNotificationOutboxJob(job) {
+export async function processNotificationOutboxJob(job, { sendPush = sendPushNotification } = {}) {
   const context = await getWalletEventNotificationContext(job.walletEventId);
 
   if (!context) {
@@ -159,6 +197,8 @@ export async function processNotificationOutboxJob(job) {
 
   const notificationId = await ensureNotificationForWalletEvent(context.id);
   const deviceTokens = await listActiveDeviceTokensByUserId(context.userId);
+  const deliveryStates = await listNotificationDeliveryStates(notificationId);
+  const deliveryStateByDeviceId = new Map(deliveryStates.map((row) => [row.deviceTokenId, row]));
 
   notificationsLogger.info({
     outboxJobId: job.id,
@@ -183,14 +223,24 @@ export async function processNotificationOutboxJob(job) {
   let deliveredCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
+  let retryableCount = 0;
 
   for (const deviceToken of deviceTokens) {
+    const previous = deliveryStateByDeviceId.get(deviceToken.id);
+
+    if (previous?.status === 'delivered' ||
+        (previous?.status === 'failed' && !previous.retryable)) {
+      skippedCount += 1;
+      continue;
+    }
+
     const delivery = await deliverNotificationForDeviceToken({
       notificationId,
       event: context,
       userId: context.userId,
       walletLabel: context.walletLabel,
-      deviceToken
+      deviceToken,
+      sendPush
     });
 
     if (delivery.delivered) {
@@ -200,6 +250,16 @@ export async function processNotificationOutboxJob(job) {
     } else {
       failedCount += 1;
     }
+
+    if (delivery.retryable) {
+      retryableCount += 1;
+    }
+  }
+
+  if (retryableCount > 0) {
+    const error = new Error('retryable_notification_delivery_failure');
+    error.code = 'FCM_DELIVERY_RETRYABLE';
+    throw error;
   }
 
   await markNotificationOutboxSent(job.id);
@@ -218,12 +278,15 @@ export async function processNotificationOutboxJob(job) {
 export async function processNotificationOutboxBatch({
   limit = NOTIFICATION_OUTBOX_BATCH_SIZE,
   maxAttempts = NOTIFICATION_OUTBOX_MAX_ATTEMPTS,
-  staleProcessingMs = NOTIFICATION_OUTBOX_STALE_PROCESSING_MS
+  staleProcessingMs = NOTIFICATION_OUTBOX_STALE_PROCESSING_MS,
+  outboxId = null,
+  sendPush = sendPushNotification
 } = {}) {
   const staleProcessingBefore = new Date(Date.now() - staleProcessingMs).toISOString();
   const jobs = await claimNotificationOutboxJobs({
     limit,
-    staleProcessingBefore
+    staleProcessingBefore,
+    outboxId
   });
 
   if (jobs.length === 0) {
@@ -241,7 +304,7 @@ export async function processNotificationOutboxBatch({
 
   for (const job of jobs) {
     try {
-      const result = await processNotificationOutboxJob(job);
+      const result = await processNotificationOutboxJob(job, { sendPush });
 
       if (result.status === 'sent') {
         sentCount += 1;

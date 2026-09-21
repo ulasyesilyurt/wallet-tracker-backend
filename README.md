@@ -24,6 +24,8 @@ The backend is split into small layers so blockchain ingestion and push delivery
 5. A notification worker creates one durable `notifications` row per alert-worthy wallet event, even when the owner has no active device tokens.
 6. The worker sends Firebase Cloud Messaging pushes to active devices and records each attempt in `notification_deliveries` for audit and debugging. Read state belongs to the logical notification.
 
+The outbox retries transient FCM failures up to three attempts with backoff. Each retry skips devices whose delivery row is already `delivered` and devices with a terminal failure. Firebase-confirmed invalid registration tokens are deactivated for their owning user. An outbox job is `sent` once no active device needs another attempt; exhausted transient failures leave the job `failed` while the logical alert remains in history. Push delivery is at least once: if FCM accepts a message but the process stops before PostgreSQL records `delivered`, the next attempt may send that device a duplicate.
+
 ### Recommended operating mode
 
 - Primary real-time mode:
@@ -246,6 +248,7 @@ SELECT
   nd.wallet_event_id,
   nd.device_token_id,
   nd.status,
+  nd.retryable,
   nd.provider_message_id,
   nd.error_message,
   nd.sent_at

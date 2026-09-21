@@ -29,11 +29,11 @@ export async function getWalletNotificationTarget(walletId) {
 export async function listActiveDeviceTokensByUserId(userId) {
   const result = await query(
     `
-      SELECT id, user_id, fcm_token, platform
+      SELECT id, user_id, fcm_token, platform, updated_at::text AS token_updated_at
       FROM device_tokens
       WHERE user_id = $1
         AND is_active = TRUE
-      ORDER BY created_at ASC
+      ORDER BY created_at ASC, id ASC
     `,
     [userId]
   );
@@ -42,7 +42,8 @@ export async function listActiveDeviceTokensByUserId(userId) {
     id: row.id,
     userId: row.user_id,
     fcmToken: row.fcm_token,
-    platform: row.platform
+    platform: row.platform,
+    tokenUpdatedAt: row.token_updated_at
   }));
 }
 
@@ -52,11 +53,12 @@ export async function upsertNotificationDelivery({
   deviceTokenId,
   status,
   providerMessageId = null,
-  errorMessage = null
-}) {
+  errorMessage = null,
+  retryable = status === 'pending'
+}, dbClient = null) {
   const sentAt = status === 'delivered' ? new Date().toISOString() : null;
 
-  await query(
+  const result = await runDbQuery(dbClient,
     `
       INSERT INTO notification_deliveries (
         notification_id,
@@ -66,9 +68,10 @@ export async function upsertNotificationDelivery({
         provider_message_id,
         error_message,
         sent_at,
+        retryable,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
       ON CONFLICT (wallet_event_id, device_token_id)
       DO UPDATE SET
         notification_id = EXCLUDED.notification_id,
@@ -76,10 +79,70 @@ export async function upsertNotificationDelivery({
         provider_message_id = EXCLUDED.provider_message_id,
         error_message = EXCLUDED.error_message,
         sent_at = EXCLUDED.sent_at,
+        retryable = EXCLUDED.retryable,
         updated_at = NOW()
+      WHERE notification_deliveries.status <> 'delivered'
     `,
-    [notificationId, walletEventId, deviceTokenId, status, providerMessageId, errorMessage, sentAt]
+    [notificationId, walletEventId, deviceTokenId, status, providerMessageId, errorMessage, sentAt, retryable]
   );
+
+  return result.rowCount > 0;
+}
+
+export async function listNotificationDeliveryStates(notificationId) {
+  const result = await query(
+    `
+      SELECT device_token_id, status, retryable
+      FROM notification_deliveries
+      WHERE notification_id = $1
+    `,
+    [notificationId]
+  );
+
+  return result.rows.map((row) => ({
+    deviceTokenId: row.device_token_id,
+    status: row.status,
+    retryable: row.retryable
+  }));
+}
+
+export async function recordInvalidTokenDelivery({
+  notificationId,
+  walletEventId,
+  deviceTokenId,
+  userId,
+  fcmToken,
+  tokenUpdatedAt,
+  errorMessage
+}) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    await upsertNotificationDelivery({
+      notificationId,
+      walletEventId,
+      deviceTokenId,
+      status: 'failed',
+      errorMessage,
+      retryable: false
+    }, client);
+    await client.query(
+      `
+        UPDATE device_tokens
+        SET is_active = FALSE, updated_at = NOW()
+        WHERE id = $1 AND user_id = $2 AND fcm_token = $3
+          AND updated_at = $4::timestamptz AND is_active = TRUE
+      `,
+      [deviceTokenId, userId, fcmToken, tokenUpdatedAt]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function ensureNotificationForWalletEvent(walletEventId) {
@@ -188,7 +251,7 @@ function mapNotificationOutboxRow(row) {
   };
 }
 
-export async function claimNotificationOutboxJobs({ limit, staleProcessingBefore }) {
+export async function claimNotificationOutboxJobs({ limit, staleProcessingBefore, outboxId = null }) {
   const client = await pool.connect();
 
   try {
@@ -199,14 +262,14 @@ export async function claimNotificationOutboxJobs({ limit, staleProcessingBefore
         WITH candidates AS (
           SELECT no.id
           FROM notification_outbox no
-          WHERE (
+          WHERE ((
             no.status = 'pending'
             AND no.next_attempt_at <= NOW()
           ) OR (
             no.status = 'processing'
             AND no.locked_at IS NOT NULL
             AND no.locked_at <= $2
-          )
+          )) AND ($3::uuid IS NULL OR no.id = $3)
           ORDER BY no.next_attempt_at ASC, no.created_at ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED
@@ -230,7 +293,7 @@ export async function claimNotificationOutboxJobs({ limit, staleProcessingBefore
           no.created_at,
           no.updated_at
       `,
-      [limit, staleProcessingBefore]
+      [limit, staleProcessingBefore, outboxId]
     );
 
     await client.query('COMMIT');

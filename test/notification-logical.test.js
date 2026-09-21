@@ -15,7 +15,14 @@ const { createApp } = await import('../src/app.js');
 const { query } = await import('../src/db/query.js');
 const { pool } = await import('../src/db/pool.js');
 const { createAccessToken } = await import('../src/utils/jwt.js');
-const { processNotificationOutboxJob } = await import('../src/modules/notifications/notifications.service.js');
+const {
+  processNotificationOutboxBatch,
+  processNotificationOutboxJob
+} = await import('../src/modules/notifications/notifications.service.js');
+const {
+  ensureNotificationForWalletEvent,
+  upsertNotificationDelivery
+} = await import('../src/modules/notifications/notifications.repository.js');
 
 const request = supertest(createApp());
 const ownerId = randomUUID();
@@ -71,6 +78,34 @@ async function getAlertAndDeliveryCounts(walletEventId) {
     [walletEventId]
   );
   return result.rows[0];
+}
+
+async function activeDeviceTokens() {
+  const result = await query(
+    'SELECT id, fcm_token FROM device_tokens WHERE user_id = $1 AND is_active = TRUE ORDER BY created_at, id',
+    [ownerId]
+  );
+  return result.rows;
+}
+
+async function deliveryRows(walletEventId) {
+  const result = await query(
+    'SELECT device_token_id, status, retryable FROM notification_deliveries WHERE wallet_event_id = $1 ORDER BY device_token_id',
+    [walletEventId]
+  );
+  return result.rows;
+}
+
+async function outboxRow(outboxId) {
+  const result = await query(
+    'SELECT status, attempt_count, next_attempt_at FROM notification_outbox WHERE id = $1',
+    [outboxId]
+  );
+  return result.rows[0];
+}
+
+async function makeRetryDue(outboxId) {
+  await query('UPDATE notification_outbox SET next_attempt_at = NOW() WHERE id = $1', [outboxId]);
 }
 
 before(async () => {
@@ -180,6 +215,184 @@ describe('logical alert history and delivery', () => {
     assert.equal(count.body.data.unreadCount, 0);
   });
 
+  test('transient FCM failure is retried with backoff and then delivered', async () => {
+    const job = await seedOutboxJob(1);
+    const first = await processNotificationOutboxBatch({
+      outboxId: job.id,
+      sendPush: async () => { throw Object.assign(new Error('temporary outage'), { code: 'messaging/server-unavailable' }); }
+    });
+
+    assert.equal(first.retryScheduledCount, 1);
+    assert.equal((await outboxRow(job.id)).status, 'pending');
+    assert.equal((await outboxRow(job.id)).attempt_count, 1);
+    assert.equal((await outboxRow(job.id)).next_attempt_at > new Date(), true);
+    assert.deepEqual(await getAlertAndDeliveryCounts(job.walletEventId), { alerts: 1, deliveries: 1 });
+    assert.equal((await deliveryRows(job.walletEventId))[0].retryable, true);
+
+    await makeRetryDue(job.id);
+    const second = await processNotificationOutboxBatch({
+      outboxId: job.id,
+      sendPush: async () => ({ delivered: true, providerMessageId: 'test-success' })
+    });
+
+    assert.equal(second.sentCount, 1);
+    assert.equal((await outboxRow(job.id)).status, 'sent');
+    assert.equal((await outboxRow(job.id)).attempt_count, 2);
+    assert.equal((await deliveryRows(job.walletEventId))[0].status, 'delivered');
+    assert.deepEqual(await getAlertAndDeliveryCounts(job.walletEventId), { alerts: 1, deliveries: 1 });
+  });
+
+  test('mixed success and transient failure retries only the failed device after restart', async () => {
+    const job = await seedOutboxJob(2);
+    const devices = await activeDeviceTokens();
+    const firstCalls = [];
+    const first = await processNotificationOutboxBatch({
+      outboxId: job.id,
+      sendPush: async (message) => {
+        firstCalls.push(message.token);
+        if (message.token === devices[1].fcm_token) {
+          throw Object.assign(new Error('temporary outage'), { code: 'messaging/server-unavailable' });
+        }
+        return { delivered: true, providerMessageId: 'first-device-success' };
+      }
+    });
+
+    assert.equal(first.retryScheduledCount, 1);
+    assert.deepEqual(firstCalls, devices.map((device) => device.fcm_token));
+    const firstRows = await deliveryRows(job.walletEventId);
+    assert.equal(firstRows.filter((row) => row.status === 'delivered').length, 1);
+    assert.equal(firstRows.filter((row) => row.status === 'failed' && row.retryable).length, 1);
+
+    await makeRetryDue(job.id);
+    const restartedWorkerCalls = [];
+    const second = await processNotificationOutboxBatch({
+      outboxId: job.id,
+      sendPush: async (message) => {
+        restartedWorkerCalls.push(message.token);
+        return { delivered: true, providerMessageId: 'second-device-success' };
+      }
+    });
+
+    assert.equal(second.sentCount, 1);
+    assert.deepEqual(restartedWorkerCalls, [devices[1].fcm_token]);
+    assert.equal((await deliveryRows(job.walletEventId)).filter((row) => row.status === 'delivered').length, 2);
+    assert.deepEqual(await getAlertAndDeliveryCounts(job.walletEventId), { alerts: 1, deliveries: 2 });
+    const history = await request.get('/api/v1/notifications').set('Authorization', `Bearer ${ownerToken}`);
+    const unread = await request.get('/api/v1/notifications/unread-count').set('Authorization', `Bearer ${ownerToken}`);
+    assert.equal(history.body.data.items.length, 1);
+    assert.equal(unread.body.data.unreadCount, 1);
+  });
+
+  test('mixed success and invalid token deactivates only the invalid device', async () => {
+    const job = await seedOutboxJob(2);
+    const devices = await activeDeviceTokens();
+    const result = await processNotificationOutboxBatch({
+      outboxId: job.id,
+      sendPush: async (message) => {
+        if (message.token === devices[1].fcm_token) {
+          throw Object.assign(new Error('not registered'), { code: 'messaging/registration-token-not-registered' });
+        }
+        return { delivered: true, providerMessageId: 'valid-device-success' };
+      }
+    });
+
+    assert.equal(result.sentCount, 1);
+    assert.equal((await outboxRow(job.id)).status, 'sent');
+    assert.deepEqual((await activeDeviceTokens()).map((device) => device.id), [devices[0].id]);
+    const rows = await deliveryRows(job.walletEventId);
+    assert.equal(rows.filter((row) => row.status === 'delivered').length, 1);
+    assert.equal(rows.filter((row) => row.status === 'failed' && !row.retryable).length, 1);
+    assert.deepEqual(await getAlertAndDeliveryCounts(job.walletEventId), { alerts: 1, deliveries: 2 });
+
+    await processNotificationOutboxJob(job, {
+      sendPush: async () => { throw new Error('already handled device was resent'); }
+    });
+    assert.equal((await deliveryRows(job.walletEventId)).filter((row) => row.status === 'delivered').length, 1);
+  });
+
+  test('generic invalid argument is terminal but does not deactivate the token', async () => {
+    const job = await seedOutboxJob(1);
+    const result = await processNotificationOutboxBatch({
+      outboxId: job.id,
+      sendPush: async () => { throw Object.assign(new Error('Invalid data payload'), { code: 'messaging/invalid-argument' }); }
+    });
+
+    assert.equal(result.sentCount, 1);
+    assert.equal((await activeDeviceTokens()).length, 1);
+    assert.equal((await deliveryRows(job.walletEventId))[0].retryable, false);
+  });
+
+  test('invalid-token cleanup does not deactivate a newer registration', async () => {
+    const job = await seedOutboxJob(1);
+    const [device] = await activeDeviceTokens();
+    const result = await processNotificationOutboxBatch({
+      outboxId: job.id,
+      sendPush: async () => {
+        await query(
+          "UPDATE device_tokens SET updated_at = NOW() + INTERVAL '1 second' WHERE id = $1",
+          [device.id]
+        );
+        throw Object.assign(new Error('no longer registered'), {
+          code: 'messaging/registration-token-not-registered'
+        });
+      }
+    });
+
+    assert.equal(result.sentCount, 1);
+    assert.equal((await activeDeviceTokens()).length, 1);
+    assert.equal((await deliveryRows(job.walletEventId))[0].retryable, false);
+  });
+
+  test('stale processing after a crash preserves a successful device delivery', async () => {
+    const job = await seedOutboxJob(2);
+    const devices = await activeDeviceTokens();
+    const notificationId = await ensureNotificationForWalletEvent(job.walletEventId);
+    await upsertNotificationDelivery({
+      notificationId, walletEventId: job.walletEventId, deviceTokenId: devices[0].id,
+      status: 'delivered', providerMessageId: 'recorded-before-crash'
+    });
+    await upsertNotificationDelivery({
+      notificationId, walletEventId: job.walletEventId, deviceTokenId: devices[1].id,
+      status: 'pending', retryable: true
+    });
+    await query(
+      `UPDATE notification_outbox
+       SET status = 'processing', attempt_count = 1, locked_at = NOW() - INTERVAL '10 minutes'
+       WHERE id = $1`,
+      [job.id]
+    );
+
+    const calls = [];
+    const result = await processNotificationOutboxBatch({
+      outboxId: job.id,
+      sendPush: async (message) => {
+        calls.push(message.token);
+        return { delivered: true, providerMessageId: 'after-restart' };
+      }
+    });
+
+    assert.equal(result.sentCount, 1);
+    assert.deepEqual(calls, [devices[1].fcm_token]);
+    assert.equal((await outboxRow(job.id)).attempt_count, 2);
+    assert.deepEqual(await getAlertAndDeliveryCounts(job.walletEventId), { alerts: 1, deliveries: 2 });
+  });
+
+  test('transient failures stop after the configured attempt limit while history remains', async () => {
+    const job = await seedOutboxJob(1);
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await makeRetryDue(job.id);
+      const result = await processNotificationOutboxBatch({
+        outboxId: job.id,
+        sendPush: async () => { throw Object.assign(new Error('temporary outage'), { code: 'messaging/server-unavailable' }); }
+      });
+      assert.equal(result.retryScheduledCount, attempt < 3 ? 1 : 0);
+      assert.equal(result.failedCount, attempt === 3 ? 1 : 0);
+    }
+    assert.equal((await outboxRow(job.id)).status, 'failed');
+    assert.equal((await outboxRow(job.id)).attempt_count, 3);
+    assert.deepEqual(await getAlertAndDeliveryCounts(job.walletEventId), { alerts: 1, deliveries: 1 });
+  });
+
   test('migration combines legacy deliveries and restores no-device outbox history', async () => {
     const client = await pool.connect();
     try {
@@ -216,6 +429,34 @@ describe('logical alert history and delivery', () => {
       assert.equal(result.rows.find((row) => row.wallet_event_id === noDeviceEventId).id, noDeviceOutboxId);
       const links = await client.query('SELECT DISTINCT notification_id FROM notification_deliveries');
       assert.deepEqual(links.rows.map((row) => row.notification_id), [firstDeliveryId]);
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  test('retryability migration protects existing successful deliveries', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('CREATE TEMP TABLE notification_deliveries (status TEXT) ON COMMIT DROP');
+      await client.query(
+        "INSERT INTO notification_deliveries (status) VALUES ('delivered'), ('failed'), ('pending')"
+      );
+      await client.query('SET LOCAL search_path TO pg_temp, public');
+      const migration = await fs.readFile(
+        new URL('../src/db/migrations/016_notification_delivery_retryability.sql', import.meta.url),
+        'utf8'
+      );
+      await client.query(migration);
+      const result = await client.query(
+        'SELECT status, retryable FROM notification_deliveries ORDER BY status'
+      );
+      assert.deepEqual(result.rows, [
+        { status: 'delivered', retryable: false },
+        { status: 'failed', retryable: true },
+        { status: 'pending', retryable: true }
+      ]);
     } finally {
       await client.query('ROLLBACK');
       client.release();

@@ -69,4 +69,8 @@ export class NotificationOutboxWorker {
 
     this.logger.info('Stopped notification outbox worker');
   }
+
+  isStarted() {
+    return this.timer !== null;
+  }
 }

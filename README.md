@@ -140,7 +140,10 @@ overrides apply only to Ethereum dry-runs; live reconciliation always reads Alch
 
 ### Health check
 
-`GET /health`
+- `GET /api/v1/health` is liveness: the HTTP process responds with `status: ok`.
+- `GET /api/v1/ready` is readiness: it returns `status: ok` only while PostgreSQL responds and the notification outbox worker has started. Otherwise it returns HTTP 503 with `status: not_ready`.
+
+Configure the deployment host to use `/api/v1/ready` for traffic gating and `/api/v1/health` for process liveness. The server checks PostgreSQL before opening its HTTP listener and exits nonzero if the startup check fails; the host should restart it. The portfolio snapshot job is not a readiness dependency.
 
 ## Local setup
 

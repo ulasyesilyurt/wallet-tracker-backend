@@ -45,6 +45,7 @@ export const globalApiRateLimiter = env.GLOBAL_API_RATE_LIMIT_MAX > 0
     windowMs: env.GLOBAL_API_RATE_LIMIT_WINDOW_MS,
     limit: env.GLOBAL_API_RATE_LIMIT_MAX,
     message: 'Too many requests. Please try again later.',
-    skip: (req) => req.originalUrl?.startsWith('/api/v1/webhooks/alchemy') || req.originalUrl === '/api/v1/health'
+    skip: (req) => req.originalUrl?.startsWith('/api/v1/webhooks/alchemy') ||
+      req.originalUrl === '/api/v1/health' || req.originalUrl === '/api/v1/ready'
   })
   : null;

@@ -4,14 +4,14 @@ import helmet from 'helmet';
 import pinoHttp from 'pino-http';
 import { logger } from './config/logger.js';
 import { globalApiRateLimiter } from './middlewares/rateLimit.js';
-import { apiRouter } from './routes/index.js';
+import { createApiRouter } from './routes/index.js';
 import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
 
 function shouldCaptureRawBody(req) {
   return req.originalUrl?.startsWith('/api/v1/webhooks/alchemy');
 }
 
-export function createApp() {
+export function createApp(readinessOptions = {}) {
   const app = express();
 
   app.use(helmet());
@@ -36,7 +36,7 @@ export function createApp() {
     app.use('/api/v1', globalApiRateLimiter);
   }
 
-  app.use('/api/v1', apiRouter);
+  app.use('/api/v1', createApiRouter(readinessOptions));
   app.use(notFoundHandler);
   app.use(errorHandler);
 

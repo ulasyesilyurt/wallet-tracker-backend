@@ -9,25 +9,47 @@ import { portfolioSummaryRouter } from '../modules/portfolioSummary/portfolioSum
 import { positionsRouter } from '../modules/positions/positions.routes.js';
 import { alchemyWebhooksRouter } from '../modules/webhooks/alchemy.routes.js';
 import { walletsRouter } from '../modules/wallets/wallets.routes.js';
+import { checkDatabaseReadiness } from '../db/readiness.js';
 
-const router = Router();
+export function createApiRouter({
+  checkDatabase = checkDatabaseReadiness,
+  isWorkerReady = () => true,
+  isShuttingDown = () => false
+} = {}) {
+  const router = Router();
 
-router.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString()
+  router.get('/health', (req, res) => {
+    res.status(200).json({
+      status: 'ok',
+      timestamp: new Date().toISOString()
+    });
   });
-});
 
-router.use(authRouter);
-router.use(walletsRouter);
-router.use(deviceTokensRouter);
-router.use(eventsRouter);
-router.use(holdingsRouter);
-router.use(notificationsRouter);
-router.use(performanceRouter);
-router.use(portfolioSummaryRouter);
-router.use(positionsRouter);
-router.use(alchemyWebhooksRouter);
+  router.get('/ready', async (req, res) => {
+    try {
+      if (isShuttingDown() || !isWorkerReady()) {
+        return res.status(503).json({ status: 'not_ready' });
+      }
 
-export const apiRouter = router;
+      const databaseReady = await checkDatabase();
+      return res.status(databaseReady ? 200 : 503).json({
+        status: databaseReady ? 'ok' : 'not_ready'
+      });
+    } catch {
+      return res.status(503).json({ status: 'not_ready' });
+    }
+  });
+
+  router.use(authRouter);
+  router.use(walletsRouter);
+  router.use(deviceTokensRouter);
+  router.use(eventsRouter);
+  router.use(holdingsRouter);
+  router.use(notificationsRouter);
+  router.use(performanceRouter);
+  router.use(portfolioSummaryRouter);
+  router.use(positionsRouter);
+  router.use(alchemyWebhooksRouter);
+
+  return router;
+}

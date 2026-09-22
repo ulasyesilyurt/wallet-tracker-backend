@@ -139,7 +139,7 @@ test('production startup refuses to listen when PostgreSQL is unavailable', asyn
 
 test('SIGTERM closes the HTTP server and database pool before exit', async () => {
   const port = await unusedPort();
-  const processHandle = spawnBackend(createProductionEnvironment({ PORT: String(port) }));
+  const processHandle = spawnBackend(createProductionEnvironment({ NODE_ENV: 'test', PORT: String(port) }));
 
   try {
     let ready = false;

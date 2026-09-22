@@ -7,6 +7,18 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  DATABASE_SSL_MODE: z.string().refine(
+    (value) => ['disable', 'verify-full'].includes(value),
+    'DATABASE_SSL_MODE must be disable or verify-full'
+  ).optional(),
+  DATABASE_SSL_CA_FILE: z.string().optional(),
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  DATABASE_CONNECTION_TIMEOUT_MS: z.coerce.number().int().min(1).default(5_000),
+  DATABASE_IDLE_TIMEOUT_MS: z.coerce.number().int().min(1).default(30_000),
+  DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(1).default(30_000),
+  DATABASE_MIGRATION_LOCK_WAIT_TIMEOUT_MS: z.coerce.number().int().min(1).default(10_000),
+  DATABASE_MIGRATION_LOCK_TIMEOUT_MS: z.coerce.number().int().min(1).default(5_000),
+  DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(1).default(300_000),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
   JWT_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(60 * 60 * 24 * 7),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
@@ -155,4 +167,8 @@ const envSchema = z.object({
   }
 });
 
-export const env = envSchema.parse(process.env);
+export function parseEnvironment(values) {
+  return envSchema.parse(values);
+}
+
+export const env = parseEnvironment(process.env);

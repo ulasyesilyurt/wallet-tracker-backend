@@ -343,12 +343,13 @@ async function countNotificationOutboxRowsForTransaction(transactionHash) {
   return result.rows[0]?.count ?? 0;
 }
 
-function runMigrationScript() {
+function runMigrationScript(overrides = {}) {
   const result = spawnSync('node', ['src/scripts/runMigrations.js'], {
     cwd: repoRoot,
     env: {
       ...process.env,
-      JWT_SECRET: process.env.JWT_SECRET
+      JWT_SECRET: process.env.JWT_SECRET,
+      ...overrides
     },
     encoding: 'utf8'
   });
@@ -748,6 +749,19 @@ describe('wallet alert settings api', () => {
 });
 
 describe('migration runner', () => {
+  test('bounds the advisory lock wait', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('SELECT pg_advisory_lock($1, $2)', [48291, 1]);
+      const result = runMigrationScript({ DATABASE_MIGRATION_LOCK_WAIT_TIMEOUT_MS: '100' });
+      assert.notEqual(result.status, 0, result.output);
+      assert.match(result.output, /57014/);
+    } finally {
+      await client.query('SELECT pg_advisory_unlock($1, $2)', [48291, 1]);
+      client.release();
+    }
+  });
+
   test('skips already applied migrations on the second run', async () => {
     const countBefore = await query('SELECT COUNT(*)::int AS count FROM schema_migrations');
     const firstRun = runMigrationScript();
@@ -794,6 +808,23 @@ describe('migration runner', () => {
     } finally {
       await fs.rm(migrationFilePath, { force: true });
       await query(`DROP TABLE IF EXISTS ${failingTableName}`);
+      await query('DELETE FROM schema_migrations WHERE filename = $1', [filename]);
+    }
+  });
+
+  test('bounds migration statements and rolls back on timeout', async () => {
+    const filename = `999_test_timeout_${Date.now()}.sql`;
+    const migrationFilePath = path.join(migrationsDir, filename);
+    await fs.writeFile(migrationFilePath, 'SELECT pg_sleep(0.25);', 'utf8');
+
+    try {
+      const result = runMigrationScript({ DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS: '100' });
+      const record = await query('SELECT filename FROM schema_migrations WHERE filename = $1', [filename]);
+      assert.notEqual(result.status, 0, result.output);
+      assert.match(result.output, /57014/);
+      assert.equal(record.rowCount, 0);
+    } finally {
+      await fs.rm(migrationFilePath, { force: true });
       await query('DELETE FROM schema_migrations WHERE filename = $1', [filename]);
     }
   });

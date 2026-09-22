@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../config/logger.js';
+import { env } from '../config/env.js';
 import { pool } from '../db/pool.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -34,9 +35,22 @@ async function acquireMigrationLock(client) {
     'Waiting for schema migration advisory lock'
   );
 
+  await client.query('SELECT set_config($1, $2, false)', [
+    'statement_timeout',
+    String(env.DATABASE_MIGRATION_LOCK_WAIT_TIMEOUT_MS)
+  ]);
   await client.query('SELECT pg_advisory_lock($1, $2)', [
     MIGRATION_LOCK_NAMESPACE,
     MIGRATION_LOCK_KEY
+  ]);
+
+  await client.query('SELECT set_config($1, $2, false)', [
+    'statement_timeout',
+    String(env.DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS)
+  ]);
+  await client.query('SELECT set_config($1, $2, false)', [
+    'lock_timeout',
+    String(env.DATABASE_MIGRATION_LOCK_TIMEOUT_MS)
   ]);
 
   logger.info(
@@ -74,10 +88,11 @@ async function getAppliedMigrationFilenames(client) {
 }
 
 async function run() {
-  const client = await pool.connect();
+  let client;
   let lockAcquired = false;
 
   try {
+    client = await pool.connect();
     await acquireMigrationLock(client);
     lockAcquired = true;
     await ensureSchemaMigrationsTable(client);
@@ -110,26 +125,26 @@ async function run() {
         logger.info({ file }, 'Applied migration successfully');
       } catch (error) {
         await client.query('ROLLBACK');
-        logger.error({ err: error, file }, 'Migration failed');
+        logger.error({ errorName: error.name, errorCode: error.code ?? null, file }, 'Migration failed');
         throw error;
       }
     }
 
     logger.info('Migrations completed successfully');
   } catch (error) {
-    logger.error({ err: error }, 'Migration run failed');
+    logger.error({ errorName: error.name, errorCode: error.code ?? null }, 'Migration run failed');
     process.exitCode = 1;
   } finally {
     if (lockAcquired) {
       try {
         await releaseMigrationLock(client);
       } catch (error) {
-        logger.error({ err: error }, 'Failed to release schema migration advisory lock');
+        logger.error({ errorName: error.name, errorCode: error.code ?? null }, 'Failed to release schema migration advisory lock');
         process.exitCode = 1;
       }
     }
 
-    client.release();
+    client?.release();
     await pool.end();
   }
 }

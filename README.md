@@ -147,6 +147,77 @@ overrides apply only to Ethereum dry-runs; live reconciliation always reads Alch
 
 Configure the deployment host to use `/api/v1/ready` for traffic gating and `/api/v1/health` for process liveness. The server checks PostgreSQL before opening its HTTP listener and exits nonzero if the startup check fails; the host should restart it. The portfolio snapshot job is not a readiness dependency.
 
+## Production database
+
+Use a PostgreSQL service with automated backups and a verified TLS endpoint. Store
+`DATABASE_URL` in the deployment secret store; do not put it in logs or source control.
+The backend uses one pool per process. Its default maximum is 10 connections, so
+reserve capacity for migrations, administration, and any additional instances.
+
+Local development uses the `.env.example` URL and disables TLS by default. In
+`NODE_ENV=production`, the backend defaults to TLS with certificate and hostname
+verification. Configure either:
+
+```env
+DATABASE_URL=postgresql://app_user:replace_me@db.example.com:5432/wallet_tracker
+DATABASE_SSL_MODE=verify-full
+DATABASE_SSL_CA_FILE=/mounted-secrets/postgres-ca.pem
+```
+
+or a URL with `sslmode=verify-full` and, when the provider supplies a private CA,
+`sslrootcert=/mounted-secrets/postgres-ca.pem`. The CA file must exist in the
+container at startup. With no custom CA, the operating system's trusted CAs are
+used. Use the provider's DNS hostname that appears in its certificate. Do not
+combine URL TLS parameters with `DATABASE_SSL_MODE` or `DATABASE_SSL_CA_FILE`.
+Production rejects disabled or unverified TLS settings. No cloud vendor is assumed.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_POOL_MAX` | `10` | Maximum connections per process |
+| `DATABASE_CONNECTION_TIMEOUT_MS` | `5000` | Maximum wait to establish or obtain a connection |
+| `DATABASE_IDLE_TIMEOUT_MS` | `30000` | Close idle pooled connections |
+| `DATABASE_STATEMENT_TIMEOUT_MS` | `30000` | PostgreSQL server limit for ordinary statements |
+| `DATABASE_MIGRATION_LOCK_WAIT_TIMEOUT_MS` | `10000` | Maximum advisory lock wait |
+| `DATABASE_MIGRATION_LOCK_TIMEOUT_MS` | `5000` | Maximum wait for table/row locks during migration SQL |
+| `DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS` | `300000` | PostgreSQL server limit for each migration statement |
+
+All timeout values are positive milliseconds. Migrations run in transactions and
+retain their advisory lock. A lock or statement timeout exits the migration command
+with failure; resolve the cause before retrying. Run migrations once as a deployment
+step before allowing traffic. Readiness still uses a three second `SELECT 1` probe
+and returns HTTP 503 when PostgreSQL is unavailable. Shutdown closes the pool.
+
+### Backup and restore readiness
+
+Minimum production requirements: enable automated daily backups and continuous WAL
+archiving or provider point-in-time recovery; retain recoverable history for at least
+14 days; encrypt backups at rest and in transit; restrict backup and restore access;
+monitor backup failures and storage capacity; and keep a backup copy independent of
+the application instance. Set an operational target of at most one hour of data loss
+and four hours to restore service. Confirm the database provider's actual recovery
+granularity and retention meet those targets before launch.
+
+At least quarterly, and after a database or backup configuration change, test a
+restore into an isolated PostgreSQL instance at a chosen recovery timestamp:
+
+1. Record backup timestamp, recovery target, source version, and restore start time.
+2. Restore using the provider's documented procedure. Keep the restored instance
+   isolated from production webhooks, workers, and notification delivery.
+3. Run `npm run migrate` against the restored database with the matching application
+   release, then check that the command exits successfully.
+4. Verify expected tables and migration records, recent `wallet_events`,
+   `notifications`, `notification_outbox`, and `chain_sync_state` rows; compare row
+   counts and latest timestamps with the source at the recovery point.
+5. Start the API with external delivery disabled, check `/api/v1/ready`, and perform
+   a read-only authenticated query. Record elapsed restore time and data gap; confirm
+   both meet the recovery targets. Delete the isolated copy securely afterward.
+
+For a portable manual snapshot, `pg_dump --format=custom --file=backup.dump` and
+`pg_restore --no-owner --dbname=wallet_tracker_restore backup.dump` use the standard
+`PGHOST`, `PGUSER`, `PGDATABASE`, and password-file connection settings. Run restore
+only against a fresh isolated database. A manual dump is supplemental and does not
+replace automated backups or point-in-time recovery.
+
 ## Local setup
 
 1. Copy `.env.example` to `.env`

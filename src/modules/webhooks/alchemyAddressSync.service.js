@@ -6,6 +6,7 @@ import {
   getChainConfigById
 } from '../chains/chains.config.js';
 import { countActiveWalletsByChainIdAndAddress } from '../wallets/wallets.repository.js';
+import { safeProviderError } from '../../utils/providerRequests.js';
 
 const alchemyAddressSyncLogger = logger.child({ module: 'alchemy-address-sync' });
 // This management endpoint is intentionally isolated here so it is easy to adjust
@@ -13,6 +14,8 @@ const alchemyAddressSyncLogger = logger.child({ module: 'alchemy-address-sync' }
 const ALCHEMY_NOTIFY_UPDATE_WEBHOOK_ADDRESSES_URL = 'https://dashboard.alchemy.com/api/update-webhook-addresses';
 const ALCHEMY_NOTIFY_GET_WEBHOOK_ADDRESSES_URL = 'https://dashboard.alchemy.com/api/webhook-addresses';
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
+const WEBHOOK_ADDRESS_PAGE_SIZE = 100;
+const WEBHOOK_ADDRESS_MAX_PAGES = 100;
 
 function normalizeAddress(address) {
   return typeof address === 'string' ? address.trim().toLowerCase() : '';
@@ -74,23 +77,35 @@ function ensureAlchemyWebhookSyncConfigured(chainId) {
 async function updateAlchemyWebhookAddresses({ chainId, addressesToAdd = [], addressesToRemove = [] }) {
   const webhookId = ensureAlchemyWebhookSyncConfigured(chainId);
 
-  const response = await fetch(ALCHEMY_NOTIFY_UPDATE_WEBHOOK_ADDRESSES_URL, {
-    method: 'PATCH',
-    headers: buildAlchemyHeaders(),
-    body: JSON.stringify({
-      webhook_id: webhookId,
-      addresses_to_add: addressesToAdd,
-      addresses_to_remove: addressesToRemove
-    }),
-    signal: AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS)
-  });
+  let response;
+  try {
+    response = await fetch(ALCHEMY_NOTIFY_UPDATE_WEBHOOK_ADDRESSES_URL, {
+      method: 'PATCH',
+      headers: buildAlchemyHeaders(),
+      body: JSON.stringify({
+        webhook_id: webhookId,
+        addresses_to_add: addressesToAdd,
+        addresses_to_remove: addressesToRemove
+      }),
+      signal: AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS)
+    });
+  } catch (error) {
+    alchemyAddressSyncLogger.warn(
+      safeProviderError('alchemy', 'webhook_address_update', error),
+      'Alchemy webhook address update request failed'
+    );
+    throw error;
+  }
 
   const responseText = await response.text();
 
   if (!response.ok) {
     const error = new Error(`Alchemy webhook address sync failed with status ${response.status}`);
     error.status = response.status;
-    error.responseText = responseText;
+    alchemyAddressSyncLogger.warn(
+      safeProviderError('alchemy', 'webhook_address_update', error),
+      'Alchemy webhook address update response failed'
+    );
     throw error;
   }
 
@@ -166,34 +181,75 @@ export async function listAlchemyWebhookWatchedAddresses(chainId = ETHEREUM_MAIN
   const seenCursors = new Set();
   let after = null;
   let totalCount = null;
+  let fetchedPages = 0;
+  const maxItems = WEBHOOK_ADDRESS_MAX_PAGES * WEBHOOK_ADDRESS_PAGE_SIZE;
 
   do {
+    if (fetchedPages >= WEBHOOK_ADDRESS_MAX_PAGES) {
+      const error = new Error('Alchemy webhook address list exceeded the page limit; refusing reconciliation');
+      error.code = 'PROVIDER_PAGE_LIMIT';
+      alchemyAddressSyncLogger.warn({
+        provider: 'alchemy',
+        operation: 'webhook_address_list',
+        errorCode: error.code,
+        fetchedPages,
+        maxPages: WEBHOOK_ADDRESS_MAX_PAGES
+      }, 'Alchemy webhook address pagination limit reached');
+      throw error;
+    }
     const url = new URL(ALCHEMY_NOTIFY_GET_WEBHOOK_ADDRESSES_URL);
     url.searchParams.set('webhook_id', webhookId);
-    url.searchParams.set('limit', '100');
+    url.searchParams.set('limit', String(WEBHOOK_ADDRESS_PAGE_SIZE));
 
     if (after) {
       url.searchParams.set('after', after);
     }
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: buildAlchemyHeaders(),
-      signal: AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS)
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: buildAlchemyHeaders(),
+        signal: AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS)
+      });
+    } catch (error) {
+      alchemyAddressSyncLogger.warn(
+        safeProviderError('alchemy', 'webhook_address_list', error),
+        'Alchemy webhook address listing failed'
+      );
+      throw error;
+    }
+    fetchedPages += 1;
 
     if (!response.ok) {
       const error = new Error(`Alchemy webhook address list failed with status ${response.status}`);
       error.status = response.status;
+      alchemyAddressSyncLogger.warn(
+        safeProviderError('alchemy', 'webhook_address_list', error),
+        'Alchemy webhook address listing response failed'
+      );
       throw error;
     }
 
-    const payload = await response.json();
+    const payload = await response.json().catch((error) => {
+      if (['AbortError', 'TimeoutError'].includes(error?.name)) {
+        throw error;
+      }
+      const invalidResponse = new Error('Alchemy webhook address list returned invalid JSON');
+      invalidResponse.code = 'PROVIDER_INVALID_RESPONSE';
+      throw invalidResponse;
+    });
     const pageCount = payload?.pagination?.total_count;
     const pageAddresses = payload?.data;
     const nextCursor = payload?.pagination?.cursors?.after ?? null;
 
-    if (!Array.isArray(pageAddresses) || !Number.isInteger(pageCount) || pageCount < 0 ||
+    if (Number.isInteger(pageCount) && pageCount > maxItems) {
+      const error = new Error('Alchemy webhook address list exceeded the item limit; refusing reconciliation');
+      error.code = 'PROVIDER_PAGE_LIMIT';
+      throw error;
+    }
+    if (!Array.isArray(pageAddresses) || pageAddresses.length > WEBHOOK_ADDRESS_PAGE_SIZE ||
+        !Number.isInteger(pageCount) || pageCount < 0 ||
         (nextCursor !== null && (typeof nextCursor !== 'string' || nextCursor.length === 0))) {
       throw new Error('Alchemy webhook address list returned an invalid response');
     }
@@ -277,7 +333,7 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
   } catch (error) {
     alchemyAddressSyncLogger.error(
       {
-        err: error,
+        ...safeProviderError('alchemy', 'webhook_address_add', error),
         chainId,
         address: normalizedAddress,
         walletId,
@@ -339,7 +395,7 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
   } catch (error) {
     alchemyAddressSyncLogger.error(
       {
-        err: error,
+        ...safeProviderError('alchemy', 'webhook_address_remove', error),
         chainId,
         address: normalizedAddress,
         walletId,

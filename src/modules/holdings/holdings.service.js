@@ -128,6 +128,10 @@ function isDegradedHoldingsResult(holdings) {
 }
 
 function isUsableLastKnownGoodHoldingsResult(holdings) {
+  if (typeof holdings?.tokenBalancesReason === 'string' &&
+      holdings.tokenBalancesReason.includes('TOKEN_BALANCES_PAGE_LIMIT')) {
+    return false;
+  }
   const holdingsCount = Array.isArray(holdings?.holdings) ? holdings.holdings.length : 0;
   const hasAnyHoldings = holdingsCount > 0;
   const isExplicitlyEmptyWallet =

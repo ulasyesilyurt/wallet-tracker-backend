@@ -1,6 +1,7 @@
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { getChainConfigById } from '../chains/chains.config.js';
+import { fetchWithTimeout, safeProviderError } from '../../utils/providerRequests.js';
 
 const positionsProviderLogger = logger.child({ module: 'positions-provider' });
 const ZERION_API_BASE_URL = 'https://api.zerion.io/v1';
@@ -8,6 +9,7 @@ const POSITIONS_CACHE_TTL_MS = 60 * 1000;
 const DEGRADED_POSITIONS_CACHE_TTL_MS = 60 * 1000;
 const POSITIONS_LAST_KNOWN_GOOD_TTL_MS = 15 * 60 * 1000;
 const ZERION_RATE_LIMIT_COOLDOWN_MS = 15 * 1000;
+const ZERION_PAGE_SIZE = 100;
 const positionsCache = new Map();
 const positionsLastKnownGoodCache = new Map();
 const inFlightPositionsPromises = new Map();
@@ -280,8 +282,13 @@ function mapZerionPosition(position, includedMap) {
 }
 
 async function fetchJson(url, options) {
-  const response = await fetch(url, options);
-  const data = await response.json().catch(() => null);
+  const response = await fetchWithTimeout(url, options, env.PROVIDER_REQUEST_TIMEOUT_MS);
+  const data = await response.json().catch((error) => {
+    if (['AbortError', 'TimeoutError'].includes(error?.name)) {
+      throw error;
+    }
+    return null;
+  });
 
   if (!response.ok) {
     const error = new Error(`Zerion positions request failed with status ${response.status}`);
@@ -320,23 +327,63 @@ async function fetchAllWalletPositions(walletAddress, zerionChainId) {
     accept: 'application/json',
     authorization: buildZerionAuthorizationHeader()
   };
-  let nextUrl = `${ZERION_API_BASE_URL}/wallets/${walletAddress}/positions/?filter[chain_ids]=${encodeURIComponent(zerionChainId)}&filter[positions]=only_complex&currency=usd&sort=-value&page[size]=100`;
+  let nextUrl = `${ZERION_API_BASE_URL}/wallets/${walletAddress}/positions/?filter[chain_ids]=${encodeURIComponent(zerionChainId)}&filter[positions]=only_complex&currency=usd&sort=-value&page[size]=${ZERION_PAGE_SIZE}`;
+  const initialUrl = new URL(nextUrl);
+  const seenUrls = new Set();
+  const maxItems = env.ZERION_MAX_PAGES * ZERION_PAGE_SIZE;
   const aggregatedData = [];
   const aggregatedIncluded = [];
+  let pageCount = 0;
+  let isPartial = false;
 
-  while (nextUrl) {
-    const response = await fetchJson(nextUrl, { headers });
-    const pageData = Array.isArray(response?.data) ? response.data : [];
+  while (nextUrl && pageCount < env.ZERION_MAX_PAGES) {
+    const pageUrl = new URL(nextUrl, initialUrl);
+    if (pageUrl.origin !== initialUrl.origin || pageUrl.pathname !== initialUrl.pathname ||
+        pageUrl.username || pageUrl.password) {
+      const error = new Error('Zerion pagination returned an unsafe next link');
+      error.code = 'PROVIDER_INVALID_PAGINATION';
+      throw error;
+    }
+    if (seenUrls.has(pageUrl.href)) {
+      isPartial = true;
+      break;
+    }
+    seenUrls.add(pageUrl.href);
+    const response = await fetchJson(pageUrl.href, { headers });
+    pageCount += 1;
+    if (!Array.isArray(response?.data) ||
+        (response?.links?.next != null && typeof response.links.next !== 'string')) {
+      const error = new Error('Zerion positions pagination response was invalid');
+      error.code = 'PROVIDER_INVALID_PAGINATION';
+      throw error;
+    }
+    const pageData = response.data;
     const pageIncluded = Array.isArray(response?.included) ? response.included : [];
 
-    aggregatedData.push(...pageData);
-    aggregatedIncluded.push(...pageIncluded);
+    const remainingData = maxItems - aggregatedData.length;
+    const remainingIncluded = maxItems * 2 - aggregatedIncluded.length;
+    aggregatedData.push(...pageData.slice(0, remainingData));
+    aggregatedIncluded.push(...pageIncluded.slice(0, remainingIncluded));
+    if (pageData.length > remainingData || pageIncluded.length > remainingIncluded) {
+      isPartial = true;
+      break;
+    }
     nextUrl = typeof response?.links?.next === 'string' && response.links.next !== '' ? response.links.next : null;
+    if (nextUrl && (aggregatedData.length >= maxItems || aggregatedIncluded.length >= maxItems * 2)) {
+      isPartial = true;
+      break;
+    }
+  }
+
+  if (nextUrl) {
+    isPartial = true;
   }
 
   return {
     data: aggregatedData,
-    included: aggregatedIncluded
+    included: aggregatedIncluded,
+    isPartial,
+    pageCount
   };
 }
 
@@ -511,17 +558,30 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
         const response = {
           walletId: chainWallet.id,
           chainId: chainWallet.chainId,
-          positions
+          positions,
+          isPartial: zerionResponse.isPartial,
+          partialReasons: zerionResponse.isPartial ? [`ZERION_PAGE_LIMIT:${chainWallet.chainId}`] : []
         };
 
-        setCachedPositionsResponse(chainWallet, response);
-        setLastKnownGoodPositionsResponse(chainWallet, response);
+        setCachedPositionsResponse(chainWallet, response, { isDegraded: zerionResponse.isPartial });
+        if (!zerionResponse.isPartial) {
+          setLastKnownGoodPositionsResponse(chainWallet, response);
+        } else {
+          positionsProviderLogger.warn({
+            provider: 'zerion',
+            operation: 'positions',
+            pageCount: zerionResponse.pageCount,
+            itemCount: positions.length,
+            maxPages: env.ZERION_MAX_PAGES
+          }, 'Zerion positions pagination limit reached; returning partial data');
+        }
 
         return response;
       } catch (error) {
         if (isUnsupportedZerionChainError(error)) {
           positionsProviderLogger.warn(
             {
+              ...safeProviderError('zerion', 'positions', error),
               walletId: chainWallet.id,
               walletAddress: chainWallet.address,
               chainId: chainWallet.chainId,
@@ -537,6 +597,11 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
 
         if (error?.status === 429) {
           const rateLimitedReason = `ZERION_RATE_LIMITED:${chainWallet.chainId}`;
+
+          positionsProviderLogger.warn(
+            safeProviderError('zerion', 'positions', error),
+            'Zerion positions rate limit response received'
+          );
 
           startZerionCooldown({
             walletId: wallet.id,
@@ -572,9 +637,10 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
           return degradedResponse;
         }
 
+        const failure = safeProviderError('zerion', 'positions', error);
         positionsProviderLogger.error(
           {
-            err: error,
+            ...failure,
             walletId: chainWallet.id,
             walletAddress: chainWallet.address,
             chainId: chainWallet.chainId
@@ -582,6 +648,7 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
           'Zerion positions provider request failed; returning empty positions response'
         );
 
+        const failureReason = failure.isTimeout ? 'ZERION_TIMEOUT' : 'FETCH_FAILED';
         if (staleSuccessfulResponse) {
           positionsProviderLogger.warn(
             {
@@ -589,16 +656,21 @@ export async function fetchWalletPositionsForChain(wallet, chainId = wallet.chai
               walletAddress: chainWallet.address,
               chainId: chainWallet.chainId,
               positionsCount: staleSuccessfulResponse.positions.length,
-              degradedReason: `FETCH_FAILED:${chainWallet.chainId}`
+              degradedReason: `${failureReason}:${chainWallet.chainId}`
             },
             'Using stale successful positions cache after provider failure'
           );
-          return staleSuccessfulResponse;
+          const partialStaleResponse = buildPartialResponseFromLastKnownGood(
+            staleSuccessfulResponse,
+            `${failureReason}:${chainWallet.chainId}`
+          );
+          setCachedPositionsResponse(chainWallet, partialStaleResponse, { isDegraded: true });
+          return partialStaleResponse;
         }
 
         return buildEmptyResponse(chainWallet, {
           isPartial: true,
-          partialReasons: [`FETCH_FAILED:${chainWallet.chainId}`]
+          partialReasons: [`${failureReason}:${chainWallet.chainId}`]
         });
       }
     })

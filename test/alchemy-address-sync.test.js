@@ -267,6 +267,41 @@ test('incomplete watched-address listing fails before stale removal can be plann
   await assert.rejects(listAlchemyWebhookWatchedAddresses(ethereum), /incomplete/);
 });
 
+test('watched-address listing stops at its finite page and item limits', async () => {
+  let calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [`0x${calls.toString(16).padStart(40, '0')}`],
+        pagination: { cursors: { after: `page-${calls}` }, total_count: 100 }
+      })
+    };
+  };
+  await assert.rejects(
+    listAlchemyWebhookWatchedAddresses(ethereum),
+    (error) => error.code === 'PROVIDER_PAGE_LIMIT'
+  );
+  assert.equal(calls, 100);
+
+  calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [], pagination: { cursors: {}, total_count: 10_001 } })
+    };
+  };
+  await assert.rejects(
+    listAlchemyWebhookWatchedAddresses(ethereum),
+    (error) => error.code === 'PROVIDER_PAGE_LIMIT'
+  );
+  assert.equal(calls, 1);
+});
+
 test('reconciliation adds missing addresses on each chain and is idempotent', async () => {
   const ethereumAddress = randomAddress();
   const baseAddress = randomAddress();

@@ -1,4 +1,4 @@
-import { JsonRpcProvider, getAddress } from 'ethers';
+import { getAddress } from 'ethers';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import {
@@ -14,6 +14,12 @@ import {
   upsertChainSyncState
 } from './ethereum.repository.js';
 import { insertWalletEvents } from '../events/events.repository.js';
+import {
+  createTimedRpcProvider,
+  safeProviderError,
+  toSafeProviderError,
+  withProviderTimeout
+} from '../../utils/providerRequests.js';
 import {
   EthereumContractMetadataCache,
   normalizeNativeTransfer,
@@ -73,7 +79,7 @@ export class EthereumWalletActivityTracker {
       throw new Error('ETHEREUM_RPC_URL is required when ENABLE_ETHEREUM_TRACKER=true');
     }
 
-    this.provider = options.provider ?? new JsonRpcProvider(env.ETHEREUM_RPC_URL);
+    this.provider = options.provider ?? createTimedRpcProvider(env.ETHEREUM_RPC_URL, env.PROVIDER_REQUEST_TIMEOUT_MS);
     this.logger = options.logger ?? logger.child({ module: 'ethereum-tracker' });
     this.running = false;
     this.timeout = null;
@@ -171,7 +177,7 @@ export class EthereumWalletActivityTracker {
     try {
       await this.pollOnce();
     } catch (error) {
-      this.logger.error({ err: error }, 'Initial Ethereum wallet activity poll failed');
+      this.logger.error(safeProviderError('alchemy', 'tracker_initial_poll', error), 'Initial Ethereum wallet activity poll failed');
     }
 
     this.scheduleNextPoll();
@@ -197,7 +203,7 @@ export class EthereumWalletActivityTracker {
       try {
         await this.pollOnce();
       } catch (error) {
-        this.logger.error({ err: error }, 'Ethereum wallet activity poll failed');
+        this.logger.error(safeProviderError('alchemy', 'tracker_poll', error), 'Ethereum wallet activity poll failed');
       } finally {
         this.scheduleNextPoll();
       }
@@ -220,13 +226,17 @@ export class EthereumWalletActivityTracker {
     for (let attempt = 0; attempt <= env.ETHEREUM_RPC_MAX_RETRIES; attempt += 1) {
       try {
         await this.waitForRpcSlot();
-        return await execute();
+        return await withProviderTimeout(execute, env.PROVIDER_REQUEST_TIMEOUT_MS);
       } catch (error) {
         const retryable = isRateLimitError(error);
         const isLastAttempt = attempt === env.ETHEREUM_RPC_MAX_RETRIES;
 
         if (!retryable || isLastAttempt) {
-          throw error;
+          this.logger.warn(
+            { ...safeProviderError('alchemy', operation, error), ...context },
+            'Ethereum RPC request failed'
+          );
+          throw toSafeProviderError('alchemy', operation, error);
         }
 
         const backoffMs = env.ETHEREUM_RPC_BACKOFF_BASE_MS * 2 ** attempt;

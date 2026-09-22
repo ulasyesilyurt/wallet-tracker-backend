@@ -1,4 +1,4 @@
-import { JsonRpcProvider, formatEther, formatUnits } from 'ethers';
+import { formatEther, formatUnits } from 'ethers';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import {
@@ -11,6 +11,13 @@ import {
   listProtectedTokenDefinitions
 } from '../events/protectedTokens.registry.js';
 import { buildAsciiSkeleton, normalizeAddress } from '../events/tokenIdentity.utils.js';
+import {
+  createTimedRpcProvider,
+  fetchWithTimeout,
+  safeProviderError,
+  toSafeProviderError,
+  withProviderTimeout
+} from '../../utils/providerRequests.js';
 
 const providersByChainId = new Map();
 const holdingsProviderLogger = logger.child({ module: 'holdings-provider' });
@@ -382,7 +389,7 @@ function getAlchemyProvider(chainId) {
     throw new Error(`Alchemy holdings provider requires an RPC URL for chain ${chainId}.`);
   }
 
-  const provider = new JsonRpcProvider(rpcUrl);
+  const provider = createTimedRpcProvider(rpcUrl, env.PROVIDER_REQUEST_TIMEOUT_MS);
   providersByChainId.set(chainId, provider);
   return provider;
 }
@@ -476,7 +483,10 @@ async function fetchTokenMetadataWithCache(alchemyProvider, chainId, contractAdd
       await acquireTokenMetadataSlot();
 
       try {
-        const metadata = await alchemyProvider.send('alchemy_getTokenMetadata', [contractAddress]);
+        const metadata = await withProviderTimeout(
+          () => alchemyProvider.send('alchemy_getTokenMetadata', [contractAddress]),
+          env.PROVIDER_REQUEST_TIMEOUT_MS
+        );
         setTokenMetadataCacheEntry(chainId, normalizedAddress, metadata, { isNegative: false, reason: null });
         return metadata;
       } catch (error) {
@@ -487,9 +497,7 @@ async function fetchTokenMetadataWithCache(alchemyProvider, chainId, contractAdd
           {
             tokenAddress: normalizedAddress,
             method: 'alchemy_getTokenMetadata',
-            errorCode: error?.code ?? null,
-            errorStatus: error?.status ?? null,
-            errorMessage: error?.message ?? null,
+            ...safeProviderError('alchemy', 'token_metadata', error),
             metadataFailureReason: classifiedError.reason,
             negativeCacheTtlMs: classifiedError.ttlMs
           },
@@ -560,7 +568,7 @@ function mapHolding({ contractAddress, tokenBalance, metadata }) {
   };
 }
 
-async function fetchAllErc20Balances(alchemyProvider, chainId, walletAddress) {
+export async function fetchAllErc20Balances(alchemyProvider, chainId, walletAddress) {
   const normalizedWalletAddress = `${chainId}:${walletAddress.toLowerCase()}`;
 
   if (inFlightTokenBalancePromises.has(normalizedWalletAddress)) {
@@ -583,6 +591,9 @@ async function fetchAllErc20Balances(alchemyProvider, chainId, walletAddress) {
 
     const tokenBalances = [];
     let pageKey;
+    let pageCount = 0;
+    const seenPageKeys = new Set();
+    const maxItems = env.ALCHEMY_TOKEN_BALANCE_MAX_PAGES * 100;
 
     do {
       const params = [walletAddress, 'erc20', { maxCount: 100 }];
@@ -597,7 +608,10 @@ async function fetchAllErc20Balances(alchemyProvider, chainId, walletAddress) {
       while (attempt <= TOKEN_BALANCE_MAX_RETRIES) {
         try {
           response = await enqueueTokenBalanceRequest(() =>
-            alchemyProvider.send('alchemy_getTokenBalances', params)
+            withProviderTimeout(
+              () => alchemyProvider.send('alchemy_getTokenBalances', params),
+              env.PROVIDER_REQUEST_TIMEOUT_MS
+            )
           );
           break;
         } catch (error) {
@@ -615,15 +629,15 @@ async function fetchAllErc20Balances(alchemyProvider, chainId, walletAddress) {
                 walletAddress: normalizedWalletAddress,
                 chainId,
                 method: 'alchemy_getTokenBalances',
-                code: error?.code ?? error?.status ?? null
+                ...safeProviderError('alchemy', 'token_balances', error)
               });
 
               holdingsProviderLogger.warn(
                 {
+                  ...safeProviderError('alchemy', 'token_balances', error),
                   walletAddress: normalizedWalletAddress,
                   chainId,
                   method: 'alchemy_getTokenBalances',
-                  code: error?.code ?? error?.status ?? null,
                   reason: 'TOKEN_BALANCES_RATE_LIMITED'
                 },
                 'Alchemy token balances request was rate-limited; returning degraded holdings response'
@@ -636,7 +650,11 @@ async function fetchAllErc20Balances(alchemyProvider, chainId, walletAddress) {
               };
             }
 
-            throw error;
+            holdingsProviderLogger.warn(
+              safeProviderError('alchemy', 'token_balances', error),
+              'Alchemy token balances request failed'
+            );
+            throw toSafeProviderError('alchemy', 'token_balances', error);
           }
 
           await delay(500 * (attempt + 1));
@@ -644,10 +662,42 @@ async function fetchAllErc20Balances(alchemyProvider, chainId, walletAddress) {
         }
       }
 
-      const currentPageBalances = Array.isArray(response?.tokenBalances) ? response.tokenBalances : [];
-
-      tokenBalances.push(...currentPageBalances);
+      if (!Array.isArray(response?.tokenBalances)) {
+        holdingsProviderLogger.warn({
+          provider: 'alchemy',
+          operation: 'token_balances',
+          errorCode: 'PROVIDER_INVALID_RESPONSE'
+        }, 'Alchemy token balances response was invalid; returning partial balances');
+        return {
+          tokenBalances,
+          tokenBalancesAvailable: false,
+          tokenBalancesReason: 'TOKEN_BALANCES_INVALID_RESPONSE'
+        };
+      }
+      const currentPageBalances = response.tokenBalances;
+      pageCount += 1;
+      const remaining = maxItems - tokenBalances.length;
+      tokenBalances.push(...currentPageBalances.slice(0, remaining));
       pageKey = typeof response?.pageKey === 'string' ? response.pageKey : undefined;
+      if (currentPageBalances.length > remaining || (pageKey &&
+          (pageCount >= env.ALCHEMY_TOKEN_BALANCE_MAX_PAGES || tokenBalances.length >= maxItems ||
+          seenPageKeys.has(pageKey)))) {
+        holdingsProviderLogger.warn({
+          provider: 'alchemy',
+          operation: 'token_balances',
+          pageCount,
+          itemCount: tokenBalances.length,
+          maxPages: env.ALCHEMY_TOKEN_BALANCE_MAX_PAGES
+        }, 'Alchemy token balances pagination limit reached; returning partial balances');
+        return {
+          tokenBalances,
+          tokenBalancesAvailable: false,
+          tokenBalancesReason: 'TOKEN_BALANCES_PAGE_LIMIT'
+        };
+      }
+      if (pageKey) {
+        seenPageKeys.add(pageKey);
+      }
     } while (pageKey);
 
     return {
@@ -684,8 +734,13 @@ function buildNativeHolding(chainId, rawBalance) {
 }
 
 async function fetchJson(url, options) {
-  const response = await fetch(url, options);
-  const data = await response.json().catch(() => null);
+  const response = await fetchWithTimeout(url, options, env.PROVIDER_REQUEST_TIMEOUT_MS);
+  const data = await response.json().catch((error) => {
+    if (['AbortError', 'TimeoutError'].includes(error?.name)) {
+      throw error;
+    }
+    return null;
+  });
 
   if (!response.ok) {
     const error = new Error(`Alchemy pricing request failed with status ${response.status}`);
@@ -749,8 +804,17 @@ async function fetchCoinGeckoEthUsdPrice() {
     'CoinGecko ETH fallback attempted'
   );
 
-  const response = await fetch(`${COINGECKO_SIMPLE_PRICE_URL}?ids=ethereum&vs_currencies=usd`);
-  const data = await response.json().catch(() => null);
+  const response = await fetchWithTimeout(
+    `${COINGECKO_SIMPLE_PRICE_URL}?ids=ethereum&vs_currencies=usd`,
+    {},
+    env.PROVIDER_REQUEST_TIMEOUT_MS
+  );
+  const data = await response.json().catch((error) => {
+    if (['AbortError', 'TimeoutError'].includes(error?.name)) {
+      throw error;
+    }
+    return null;
+  });
 
   if (!response.ok) {
     const error = new Error(`CoinGecko ETH price request failed with status ${response.status}`);
@@ -865,6 +929,7 @@ async function fetchNativeEthUsdPrice(apiKey, chainId) {
 
     holdingsProviderLogger.warn(
       {
+        ...safeProviderError('alchemy', 'eth_price', error),
         status: error?.status ?? null,
         pricingReason,
         priceSource: 'alchemy'
@@ -880,6 +945,7 @@ async function fetchNativeEthUsdPrice(apiKey, chainId) {
   } catch (coinGeckoError) {
     holdingsProviderLogger.warn(
       {
+        ...safeProviderError('coingecko', 'eth_price', coinGeckoError),
         pricingTarget: 'ETH',
         priceSource: 'coingecko',
         status: coinGeckoError?.status ?? null
@@ -943,9 +1009,14 @@ async function fetchErc20PricesByAddress(apiKey, chainId, holdings) {
   const reasonMap = new Map();
   const uncachedAddressPayload = [];
   const waitForCacheKeys = [];
+  const seenAddresses = new Set();
 
   for (const holding of addressHoldings) {
     const normalizedAddress = holding.tokenAddress.toLowerCase();
+    if (seenAddresses.has(normalizedAddress)) {
+      continue;
+    }
+    seenAddresses.add(normalizedAddress);
     const cacheKey = buildAddressCacheKey(chainId, normalizedAddress);
     const cachedEntry = getPriceCacheEntry(cacheKey);
 
@@ -1079,6 +1150,7 @@ async function fetchErc20PricesByAddress(apiKey, chainId, holdings) {
 
       holdingsProviderLogger.warn(
         {
+          ...safeProviderError('alchemy', 'price_by_address', error),
           status: error?.status ?? null,
           chunkSize: chunk.length,
           pricingReason
@@ -1304,6 +1376,7 @@ async function fetchErc20PricesBySymbol(apiKey, chainId, holdings) {
 
       holdingsProviderLogger.warn(
         {
+          ...safeProviderError('alchemy', 'price_by_symbol', error),
           status: error?.status ?? null,
           chunkSize: chunk.length,
           pricingReason
@@ -1541,7 +1614,16 @@ export async function fetchWalletHoldingsForChain(wallet, chainId = wallet.chain
   const alchemyProvider = getAlchemyProvider(chainWallet.chainId);
   const alchemyApiKey = extractAlchemyApiKey(chainWallet.chainId);
   const [nativeBalance, tokenBalanceResult] = await Promise.all([
-    alchemyProvider.getBalance(chainWallet.address),
+    withProviderTimeout(
+      () => alchemyProvider.getBalance(chainWallet.address),
+      env.PROVIDER_REQUEST_TIMEOUT_MS
+    ).catch((error) => {
+      holdingsProviderLogger.warn(
+        safeProviderError('alchemy', 'native_balance', error),
+        'Alchemy native balance request failed'
+      );
+      throw toSafeProviderError('alchemy', 'native_balance', error);
+    }),
     fetchAllErc20Balances(alchemyProvider, chainWallet.chainId, chainWallet.address)
   ]);
   const tokenBalances = tokenBalanceResult.tokenBalances;

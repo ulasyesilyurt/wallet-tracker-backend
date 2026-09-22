@@ -191,6 +191,33 @@ requests support the existing HTTP methods and requested headers, including
 than browser cookies, so CORS credentials are not enabled. CORS is a browser
 access rule; it does not authenticate API or webhook requests.
 
+## Provider request budgets
+
+`PROVIDER_REQUEST_TIMEOUT_MS` defaults to 5000 ms per Alchemy RPC, Alchemy
+pricing, Zerion positions, and CoinGecko fallback request. HTTP requests use an
+abort signal; ethers RPC transports also have a request deadline. The existing
+Alchemy Notify management calls retain their separate
+`ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS` default of 10000 ms. The Firebase Admin SDK
+uses its own 15000 ms messaging request timeout.
+
+`ZERION_MAX_PAGES=10` bounds one wallet/chain positions fetch to ten pages of
+100 requested positions (at most 1000 positions and 2000 included records kept).
+`ALCHEMY_TOKEN_BALANCE_MAX_PAGES=5` bounds one wallet/chain balance fetch to
+five pages of 100 requested balances (at most 500 kept). When either limit is
+reached, positions or holdings are marked partial and report a page-limit reason;
+they must not be interpreted as complete portfolio values. Page-limited holdings
+do not replace the last known good or persisted holdings snapshot. Alchemy webhook
+watched-address reconciliation has a fixed 100-page, 10000-address limit and
+fails that chain's reconciliation before applying its changes when the limit is
+exceeded.
+
+Existing metadata and price caches, in-flight request reuse, 429 cooldowns,
+stale positions/holdings fallbacks, and the eight-second per-chain holdings
+response timeout remain in place. Tune page limits only after measuring normal
+wallet sizes and provider usage; each extra page can trigger metadata and pricing
+requests. Provider errors are logged by provider, operation, safe code/status,
+and timeout classification without API keys or credential-bearing URLs.
+
 ## Production database
 
 Use a PostgreSQL service with automated backups and a verified TLS endpoint. Store

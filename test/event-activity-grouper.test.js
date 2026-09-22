@@ -55,6 +55,19 @@ function buildNftEvent(overrides = {}) {
 }
 
 describe('wallet event transaction grouping', () => {
+  test('incomplete transaction groups stay as individual events in input order', () => {
+    const hash = `0x${'f'.repeat(64)}`;
+    const first = buildEvent({ transactionHash: hash });
+    const middle = buildEvent();
+    const last = buildNftEvent({ transactionHash: hash });
+    const incompleteGroupKeys = new Set([`${wallet.id}:${first.chainId}:${hash}`]);
+
+    const result = groupWalletEventsByTransaction([first, middle, last], wallet, { incompleteGroupKeys });
+
+    assert.deepEqual(result.map((event) => event.id), [first.id, middle.id, last.id]);
+    assert.ok(result.every((event) => event.itemType === 'event'));
+  });
+
   test('wraps a simple raw event additively', () => {
     const event = buildEvent();
     const result = groupWalletEventsByTransaction([event], wallet);

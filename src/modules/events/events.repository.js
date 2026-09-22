@@ -301,7 +301,7 @@ export async function insertWalletEvents(events, logger = null, options = {}) {
   return insertedEvents;
 }
 
-export async function listWalletEventsByWalletId(walletId) {
+export async function listWalletEventsByWalletId(walletId, { limit, offset }) {
   const result = await query(
     `
       SELECT
@@ -335,11 +335,58 @@ export async function listWalletEventsByWalletId(walletId) {
       FROM wallet_events
       WHERE wallet_id = $1
       ORDER BY occurred_at DESC, created_at DESC, id DESC
+      LIMIT $2
+      OFFSET $3
     `,
-    [walletId]
+    [walletId, limit + 1, offset]
   );
 
-  return result.rows.map(mapWalletEvent);
+  return {
+    items: result.rows.slice(0, limit).map(mapWalletEvent),
+    pagination: {
+      limit,
+      offset,
+      hasMore: result.rows.length > limit
+    }
+  };
+}
+
+export async function findIncompleteWalletEventGroupKeys(walletId, events) {
+  if (events.length === 0) {
+    return new Set();
+  }
+
+  const pageCounts = new Map();
+  const groups = new Map();
+  for (const event of events) {
+    const key = `${event.walletId}:${event.chainId}:${event.transactionHash}`;
+    pageCounts.set(key, (pageCounts.get(key) ?? 0) + 1);
+    groups.set(key, { chainId: event.chainId, transactionHash: event.transactionHash });
+  }
+
+  const selectedGroups = [...groups.values()];
+  const result = await query(
+    `
+      SELECT chain_id, transaction_hash, COUNT(*)::int AS event_count
+      FROM wallet_events
+      WHERE wallet_id = $1
+        AND (chain_id, transaction_hash) IN (
+          SELECT chain_id, transaction_hash
+          FROM UNNEST($2::text[], $3::text[]) AS selected(chain_id, transaction_hash)
+        )
+      GROUP BY chain_id, transaction_hash
+    `,
+    [walletId, selectedGroups.map((group) => group.chainId), selectedGroups.map((group) => group.transactionHash)]
+  );
+
+  const incompleteKeys = new Set();
+  for (const row of result.rows) {
+    const key = `${walletId}:${row.chain_id}:${row.transaction_hash}`;
+    if (row.event_count > (pageCounts.get(key) ?? 0)) {
+      incompleteKeys.add(key);
+    }
+  }
+  return incompleteKeys;
 }
 
 export async function listGlobalActivityByUserId(userId, { limit, offset }) {

@@ -107,7 +107,16 @@ Base URL: `/api/v1`
 
 `GET /wallets/:walletId/events`
 
-Returns normalized wallet events sorted by newest first.
+Returns normalized wallet events sorted by `occurredAt`, `createdAt`, then event ID,
+all newest first. The response keeps `data` as an array for existing mobile clients.
+It now also includes a top-level `pagination` object with `limit`, `offset`, and
+`hasMore`. `limit` defaults to 50, may be 1–100, and `offset` defaults to 0;
+invalid values return `400`. For example, request
+`/wallets/:walletId/events?limit=50&offset=50` for the second page. The existing
+`groupTransactions=true` option remains available and groups complete transactions
+within the selected page. Events from a transaction split across pages remain
+individual event items so the API does not present an incomplete purchase or sale
+as a complete transaction. A mobile load-more flow is needed to display older pages.
 
 ### Alchemy webhook
 

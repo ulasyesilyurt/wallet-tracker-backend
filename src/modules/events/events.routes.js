@@ -15,7 +15,9 @@ const walletEventsParamsSchema = z.object({
       groupTransactions: z
         .enum(['true', 'false'])
         .default('false')
-        .transform((value) => value === 'true')
+        .transform((value) => value === 'true'),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      offset: z.coerce.number().int().min(0).default(0)
     })
     .default({}),
   body: z.object({}).default({})

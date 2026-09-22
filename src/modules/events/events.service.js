@@ -1,12 +1,16 @@
 import { HttpError } from '../../utils/httpError.js';
 import { findWalletById, findWalletByIdOnly } from '../wallets/wallets.repository.js';
 import { groupWalletEventsByTransaction } from './eventActivityGrouper.js';
-import { listGlobalActivityByUserId, listWalletEventsByWalletId } from './events.repository.js';
+import {
+  findIncompleteWalletEventGroupKeys,
+  listGlobalActivityByUserId,
+  listWalletEventsByWalletId
+} from './events.repository.js';
 
 export async function listWalletEvents(
   walletId,
   userId = null,
-  { groupTransactions = false } = {}
+  { groupTransactions = false, limit = 50, offset = 0 } = {}
 ) {
   const wallet = userId
     ? await findWalletById(walletId, userId)
@@ -16,13 +20,19 @@ export async function listWalletEvents(
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
   }
 
-  const events = await listWalletEventsByWalletId(walletId);
+  const result = await listWalletEventsByWalletId(walletId, { limit, offset });
 
   if (!groupTransactions) {
-    return events;
+    return result;
   }
 
-  return groupWalletEventsByTransaction(events, wallet);
+  const incompleteGroupKeys = result.items.some((event) => event.assetType === 'nft')
+    ? await findIncompleteWalletEventGroupKeys(walletId, result.items)
+    : new Set();
+  return {
+    ...result,
+    items: groupWalletEventsByTransaction(result.items, wallet, { incompleteGroupKeys })
+  };
 }
 
 export async function listGlobalActivity(userId, { limit, offset }) {

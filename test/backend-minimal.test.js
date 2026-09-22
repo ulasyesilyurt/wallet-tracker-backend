@@ -433,6 +433,149 @@ describe('wallet data authorization', () => {
   }
 });
 
+describe('wallet event history pagination', () => {
+  before(async () => {
+    await clearWalletEventArtifacts();
+  });
+
+  after(async () => {
+    await clearWalletEventArtifacts();
+  });
+
+  test('empty history keeps the array contract and reports no next page', async () => {
+    const response = await request
+      .get(`/api/v1/wallets/${wallet.id}/events`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.data, []);
+    assert.deepEqual(response.body.pagination, { limit: 50, offset: 0, hasMore: false });
+  });
+
+  test('seeds more events than one page with deterministic timestamp ties', async () => {
+    await query(
+      `
+        INSERT INTO wallet_events (
+          wallet_id, chain_id, transaction_hash, event_type, asset_type,
+          asset_symbol, asset_name, amount, occurred_at, created_at,
+          explorer_url, raw_payload
+        )
+        SELECT
+          $1,
+          CASE WHEN sequence_number % 3 = 0 THEN 'base-mainnet' ELSE $2 END,
+          '0x' || LPAD(TO_HEX(sequence_number), 64, '0'),
+          'native_transfer'::wallet_track_type,
+          'coin', 'ETH', 'Ethereum', 1,
+          '2026-09-01T00:00:00Z'::timestamptz + (sequence_number / 5) * INTERVAL '1 second',
+          '2026-09-01T01:00:00Z'::timestamptz,
+          'https://example.test/tx/' || sequence_number,
+          '{}'::jsonb
+        FROM GENERATE_SERIES(1, 123) AS sequence_number
+      `,
+      [wallet.id, wallet.chainId]
+    );
+
+    const count = await query('SELECT COUNT(*)::int AS count FROM wallet_events WHERE wallet_id = $1', [wallet.id]);
+    assert.equal(count.rows[0].count, 123);
+  });
+
+  test('default, smaller, and last pages preserve SQL ordering without duplicates', async () => {
+    const expected = await query(
+      'SELECT id FROM wallet_events WHERE wallet_id = $1 ORDER BY occurred_at DESC, created_at DESC, id DESC',
+      [wallet.id]
+    );
+    const first = await request
+      .get(`/api/v1/wallets/${wallet.id}/events`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    const second = await request
+      .get(`/api/v1/wallets/${wallet.id}/events?limit=7&offset=50`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    const last = await request
+      .get(`/api/v1/wallets/${wallet.id}/events?limit=50&offset=100`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(first.status, 200);
+    assert.equal(first.body.data.length, 50);
+    assert.deepEqual(first.body.pagination, { limit: 50, offset: 0, hasMore: true });
+    assert.deepEqual(first.body.data.map((event) => event.id), expected.rows.slice(0, 50).map((row) => row.id));
+    assert.equal(second.body.data.length, 7);
+    assert.deepEqual(second.body.pagination, { limit: 7, offset: 50, hasMore: true });
+    assert.deepEqual(second.body.data.map((event) => event.id), expected.rows.slice(50, 57).map((row) => row.id));
+    assert.equal(last.body.data.length, 23);
+    assert.deepEqual(last.body.pagination, { limit: 50, offset: 100, hasMore: false });
+    assert.deepEqual(last.body.data.map((event) => event.id), expected.rows.slice(100).map((row) => row.id));
+    assert.equal(new Set([...first.body.data, ...second.body.data, ...last.body.data].map((event) => event.id)).size, 80);
+  });
+
+  test('hard maximum, invalid parameters, ownership, and grouping behavior remain enforced', async () => {
+    const basePath = `/api/v1/wallets/${wallet.id}/events`;
+    const maximum = await request.get(`${basePath}?limit=100`).set('Authorization', `Bearer ${ownerToken}`);
+    const grouped = await request.get(`${basePath}?groupTransactions=true&limit=3`).set('Authorization', `Bearer ${ownerToken}`);
+    const nonOwner = await request.get(`${basePath}?limit=3&offset=3`).set('Authorization', `Bearer ${nonOwnerToken}`);
+
+    assert.equal(maximum.status, 200);
+    assert.equal(maximum.body.data.length, 100);
+    assert.equal(maximum.body.pagination.hasMore, true);
+    assert.equal(grouped.status, 200);
+    assert.equal(grouped.body.data.length, 3);
+    assert.ok(grouped.body.data.every((event) => event.itemType === 'event'));
+    assert.deepEqual(grouped.body.pagination, { limit: 3, offset: 0, hasMore: true });
+    assert.equal(nonOwner.status, 404);
+    assert.equal(nonOwner.body.error.code, 'WALLET_NOT_FOUND');
+
+    for (const queryString of ['limit=101', 'limit=0', 'limit=1.5', 'offset=-1']) {
+      const invalid = await request.get(`${basePath}?${queryString}`).set('Authorization', `Bearer ${ownerToken}`);
+      assert.equal(invalid.status, 400, queryString);
+      assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');
+    }
+  });
+
+  test('grouped pages do not classify a transaction split across the page boundary', async () => {
+    await clearWalletEventArtifacts();
+    const transactionHash = `0x${'a'.repeat(64)}`;
+    await query(
+      `
+        INSERT INTO wallet_events (
+          wallet_id, chain_id, transaction_hash, event_type, asset_type,
+          asset_symbol, asset_name, amount, nft_contract_address, nft_token_id,
+          direction, from_address, to_address, usd_value,
+          occurred_at, created_at, explorer_url, raw_payload
+        )
+        VALUES
+          ($1, $2, $3, 'native_transfer', 'coin', 'ETH', 'Ethereum', 0.2, NULL, NULL,
+           'outgoing', $4, $5, 600,
+           '2026-09-01T00:00:00Z', '2026-09-01T00:00:02Z', $6, '{}'::jsonb),
+          ($1, $2, $3, 'nft_transfer', 'nft', 'TEST', 'Test NFT', 1, $7, '1',
+           'incoming', $8, $4, NULL,
+           '2026-09-01T00:00:00Z', '2026-09-01T00:00:01Z', $6, '{}'::jsonb)
+      `,
+      [
+        wallet.id, wallet.chainId, transactionHash, wallet.address.toLowerCase(),
+        '0x2222222222222222222222222222222222222222',
+        `https://example.test/tx/${transactionHash}`,
+        '0x4444444444444444444444444444444444444444',
+        '0x3333333333333333333333333333333333333333'
+      ]
+    );
+
+    const basePath = `/api/v1/wallets/${wallet.id}/events?groupTransactions=true`;
+    const first = await request.get(`${basePath}&limit=1&offset=0`).set('Authorization', `Bearer ${ownerToken}`);
+    const second = await request.get(`${basePath}&limit=1&offset=1`).set('Authorization', `Bearer ${ownerToken}`);
+    const together = await request.get(`${basePath}&limit=2`).set('Authorization', `Bearer ${ownerToken}`);
+
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(first.body.data[0].itemType, 'event');
+    assert.equal(second.body.data[0].itemType, 'event');
+    assert.notEqual(first.body.data[0].id, second.body.data[0].id);
+    assert.equal(first.body.pagination.hasMore, true);
+    assert.equal(second.body.pagination.hasMore, false);
+    assert.equal(together.body.data.length, 1);
+    assert.equal(together.body.data[0].itemType, 'transaction');
+    assert.equal(together.body.data[0].activityType, 'nft_purchase');
+  });
+});
+
 describe('notification history api', () => {
   test('requires authentication for history and unread state endpoints', async () => {
     const historyResponse = await request.get('/api/v1/notifications');

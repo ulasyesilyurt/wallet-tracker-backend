@@ -220,13 +220,16 @@ function mapGroupedTransaction(events, wallet, classification) {
   };
 }
 
-export function groupWalletEventsByTransaction(events, wallet) {
+export function groupWalletEventsByTransaction(events, wallet, { incompleteGroupKeys = new Set() } = {}) {
   const eventGroups = new Map();
 
   for (const event of events) {
-    const groupKey = event.transactionHash
+    const transactionGroupKey = event.transactionHash
       ? `${event.walletId}:${event.chainId}:${event.transactionHash}`
       : `event:${event.id}`;
+    const groupKey = incompleteGroupKeys.has(transactionGroupKey)
+      ? `event:${event.id}`
+      : transactionGroupKey;
     const group = eventGroups.get(groupKey) ?? [];
 
     group.push(event);

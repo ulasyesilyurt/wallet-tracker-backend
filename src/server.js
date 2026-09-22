@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
@@ -8,6 +9,12 @@ import { BASE_MAINNET_CHAIN_ID, ETHEREUM_MAINNET_CHAIN_ID } from './modules/chai
 import { getAlchemyAddressActivityWebhookIdForChain } from './modules/webhooks/alchemyAddressSync.service.js';
 import { PortfolioSnapshotJob } from './modules/performance/performance.job.js';
 import { NotificationOutboxWorker } from './modules/notifications/notificationOutbox.worker.js';
+import { buildOperationalStatus } from './modules/operations/operations.service.js';
+import { safeErrorDetails } from './utils/safeError.js';
+
+const require = createRequire(import.meta.url);
+const { version: appVersion } = require('../package.json');
+const processStartedAt = new Date(Date.now() - process.uptime() * 1_000).toISOString();
 
 const ethereumTracker = env.ENABLE_ETHEREUM_TRACKER ? new EthereumWalletActivityTracker() : null;
 const portfolioSnapshotJob = env.ENABLE_PORTFOLIO_SNAPSHOT_JOB
@@ -19,9 +26,27 @@ let shutdownPromise = null;
 let server = null;
 const app = createApp({
   isWorkerReady: () => notificationOutboxWorker.isStarted(),
-  isShuttingDown: () => shuttingDown
+  isShuttingDown: () => shuttingDown,
+  getOperationalStatus: () => buildOperationalStatus({
+    getWorkerStatus: () => notificationOutboxWorker.getStatus(),
+    getSnapshotStatus: () => portfolioSnapshotJob?.getStatus() ?? { enabled: false },
+    getProcessInfo: () => ({
+      appVersion,
+      nodeEnv: env.NODE_ENV,
+      startedAt: processStartedAt,
+      uptimeSeconds: Math.floor(process.uptime()),
+      shuttingDown
+    })
+  })
 });
 const SHUTDOWN_TIMEOUT_MS = 10_000;
+
+logger.info({
+  event: 'process_start',
+  appVersion,
+  nodeEnv: env.NODE_ENV,
+  processStartedAt
+}, 'Wallet tracker backend process starting');
 
 function logListening() {
   logger.info(
@@ -106,7 +131,13 @@ function shutdown(signal, exitCode = 0) {
   }
 
   shuttingDown = true;
-  logger.info({ signal }, 'Shutting down gracefully');
+  const shutdownStartedAt = Date.now();
+  logger.info({
+    event: 'graceful_shutdown_started',
+    reason: signal,
+    appVersion,
+    uptimeSeconds: Math.floor(process.uptime())
+  }, 'Shutting down gracefully');
   const deadline = setTimeout(() => {
     logger.error({ signal, timeoutMs: SHUTDOWN_TIMEOUT_MS }, 'Shutdown deadline exceeded');
     process.exit(1);
@@ -122,10 +153,19 @@ function shutdown(signal, exitCode = 0) {
     ]);
     await pool.end();
     clearTimeout(deadline);
-    process.exit(exitCode || stopped.some((result) => result.status === 'rejected') ? 1 : 0);
+    const componentStopFailed = stopped.some((result) => result.status === 'rejected');
+    const finalExitCode = exitCode || componentStopFailed ? 1 : 0;
+    logger.info({
+      event: 'graceful_shutdown_completed',
+      reason: signal,
+      exitCode: finalExitCode,
+      durationMs: Date.now() - shutdownStartedAt,
+      componentStopFailed
+    }, 'Graceful shutdown completed');
+    process.exit(finalExitCode);
   })().catch((error) => {
     clearTimeout(deadline);
-    logger.error({ errorName: error.name, errorCode: error.code ?? null }, 'Shutdown failed');
+    logger.error(safeErrorDetails(error), 'Shutdown failed');
     process.exit(1);
   });
 
@@ -148,30 +188,30 @@ async function start() {
 
   server = app.listen(env.PORT, logListening);
   server.on('error', (error) => {
-    logger.error({ errorName: error.name, errorCode: error.code ?? null }, 'HTTP server error');
+    logger.error(safeErrorDetails(error), 'HTTP server error');
     void shutdown('HTTP_SERVER_ERROR', 1);
   });
 
   notificationOutboxWorker.start().catch((error) => {
-    logger.error({ errorName: error.name, errorCode: error.code ?? null }, 'Notification outbox worker did not start');
+    logger.error(safeErrorDetails(error), 'Notification outbox worker did not start');
     void shutdown('NOTIFICATION_WORKER_START_FAILURE', 1);
   });
 
   if (ethereumTracker) {
     ethereumTracker.start().catch((error) => {
-      logger.error({ errorName: error.name, errorCode: error.code ?? null }, 'Failed to start Ethereum wallet activity tracker');
+      logger.error(safeErrorDetails(error), 'Failed to start Ethereum wallet activity tracker');
     });
   }
 
   if (portfolioSnapshotJob) {
     portfolioSnapshotJob.start().catch((error) => {
-      logger.error({ errorName: error.name, errorCode: error.code ?? null }, 'Failed to start portfolio snapshot job');
+      logger.error(safeErrorDetails(error), 'Failed to start portfolio snapshot job');
     });
   }
 }
 
 start().catch((error) => {
-  logger.error({ errorName: error.name, errorCode: error.code ?? null }, 'Backend startup failed');
+  logger.error(safeErrorDetails(error), 'Backend startup failed');
   if (!shuttingDown) {
     void shutdown('STARTUP_FAILURE', 1);
   }

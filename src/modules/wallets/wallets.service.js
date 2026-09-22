@@ -17,11 +17,22 @@ import {
   syncAlchemyWebhookAddressOnWalletUpdate
 } from '../webhooks/alchemyAddressSync.service.js';
 import { applyWalletAlertSettingsDefaults } from '../notifications/notificationRules.service.js';
+import { safeErrorDetails } from '../../utils/safeError.js';
+import {
+  recordAlchemySyncFailure,
+  recordAlchemySyncSuccess
+} from '../operations/operationalState.js';
 
 const walletsServiceLogger = logger.child({ module: 'wallets-service' });
 
 function reportAlchemySyncFailure(error, context, message) {
-  walletsServiceLogger.error({ err: error, ...context }, message);
+  recordAlchemySyncFailure(error);
+  walletsServiceLogger.error({
+    provider: 'alchemy',
+    operation: 'wallet_subscription_sync',
+    ...safeErrorDetails(error),
+    ...context
+  }, message);
   throw new HttpError(
     503,
     'ALCHEMY_WEBHOOK_SYNC_FAILED',
@@ -78,11 +89,10 @@ export async function createWallet(payload) {
 
     try {
       await syncAlchemyWebhookAddressOnWalletUpdate(existingWallet, updatedExistingWallet);
+      recordAlchemySyncSuccess();
     } catch (error) {
       reportAlchemySyncFailure(error, {
         walletId: updatedExistingWallet.id,
-        previousAddress: existingWallet.address,
-        nextAddress: updatedExistingWallet.address,
         previousEnabledChains: existingWallet.enabledChains,
         nextEnabledChains: updatedExistingWallet.enabledChains
       }, 'Alchemy webhook sync failed after address-centric wallet merge');
@@ -96,10 +106,11 @@ export async function createWallet(payload) {
 
     try {
       await syncAlchemyWebhookAddressOnWalletCreate(wallet);
+      recordAlchemySyncSuccess();
     } catch (error) {
       reportAlchemySyncFailure(
         error,
-        { walletId: wallet.id, chainId: wallet.chainId, address: wallet.address },
+        { walletId: wallet.id, chainId: wallet.chainId },
         'Alchemy webhook sync failed after wallet create'
       );
     }
@@ -141,10 +152,11 @@ export async function removeWallet(walletId, userId) {
 
   try {
     await syncAlchemyWebhookAddressOnWalletDelete(existingWallet);
+    recordAlchemySyncSuccess();
   } catch (error) {
     reportAlchemySyncFailure(
       error,
-      { walletId: existingWallet.id, enabledChains: existingWallet.enabledChains, address: existingWallet.address },
+      { walletId: existingWallet.id, enabledChains: existingWallet.enabledChains },
       'Alchemy webhook sync failed after wallet delete'
     );
   }
@@ -168,11 +180,10 @@ export async function updateWallet(walletId, userId, payload) {
   if (payload.address !== undefined || payload.enabledChains !== undefined) {
     try {
       await syncAlchemyWebhookAddressOnWalletUpdate(existingWallet, updatedWallet);
+      recordAlchemySyncSuccess();
     } catch (error) {
       reportAlchemySyncFailure(error, {
         walletId: updatedWallet.id,
-        previousAddress: existingWallet.address,
-        nextAddress: updatedWallet.address,
         previousEnabledChains: existingWallet.enabledChains,
         nextEnabledChains: updatedWallet.enabledChains
       }, 'Alchemy webhook sync failed after wallet update');

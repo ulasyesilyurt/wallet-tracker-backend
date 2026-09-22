@@ -1,5 +1,6 @@
 import { HttpError } from '../../utils/httpError.js';
 import { logger } from '../../config/logger.js';
+import { safeErrorDetails } from '../../utils/safeError.js';
 import { findWalletById, findWalletByIdOnly, listWalletsByUserId, listWalletsForSnapshotJob } from '../wallets/wallets.repository.js';
 import { getWalletPortfolioSummary } from '../portfolioSummary/portfolioSummary.service.js';
 import {
@@ -198,7 +199,12 @@ export async function captureAllWalletPortfolioSnapshots() {
     } catch (error) {
       failedCount += 1;
       performanceLogger.error(
-        { err: error, walletId: wallet.id, chainId: wallet.chainId },
+        {
+          operation: 'portfolio_snapshot_wallet',
+          walletId: wallet.id,
+          chainId: wallet.chainId,
+          ...safeErrorDetails(error)
+        },
         'Failed to capture wallet portfolio snapshot'
       );
     }

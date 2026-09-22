@@ -17,6 +17,7 @@ const requestScript = `
     .set('Proxy-Authorization', 'Basic test-proxy-secret')
     .set('Cookie', 'session=test-cookie-secret')
     .set('X-Api-Key', 'test-api-key-secret')
+    .set('X-Operations-Token', 'test-operations-secret')
     .set('X-Alchemy-Token', 'test-alchemy-secret')
     .set('X-Alchemy-Signature', 'test-signature-secret')
     .set('X-Request-Id', 'safe-request-marker');
@@ -68,6 +69,7 @@ for (const nodeEnv of ['development', 'production']) {
     assert.equal(httpLog.req.headers['proxy-authorization'], '[Redacted]');
     assert.equal(httpLog.req.headers.cookie, '[Redacted]');
     assert.equal(httpLog.req.headers['x-api-key'], '[Redacted]');
+    assert.equal(httpLog.req.headers['x-operations-token'], '[Redacted]');
     assert.equal(httpLog.req.headers['x-alchemy-token'], '[Redacted]');
     assert.equal(httpLog.req.headers['x-alchemy-signature'], '[Redacted]');
     assert.equal(responseLog.res.headers['set-cookie'], '[Redacted]');
@@ -79,6 +81,7 @@ for (const nodeEnv of ['development', 'production']) {
       'test-proxy-secret',
       'test-cookie-secret',
       'test-api-key-secret',
+      'test-operations-secret',
       'test-alchemy-secret',
       'test-signature-secret',
       'test-response-cookie-secret'

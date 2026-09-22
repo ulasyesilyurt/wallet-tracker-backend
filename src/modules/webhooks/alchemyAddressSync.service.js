@@ -306,7 +306,7 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
 
   if (!chainConfig) {
     alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason },
+      { chainId, walletId, reason },
       'Alchemy webhook address sync add skipped for unsupported chain'
     );
     return false;
@@ -315,7 +315,7 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
   ensureAlchemyWebhookSyncConfigured(chainId);
 
   alchemyAddressSyncLogger.info(
-    { chainId, address: normalizedAddress, walletId, reason },
+    { chainId, walletId, reason },
     'Alchemy webhook address sync add started'
   );
 
@@ -326,7 +326,7 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
     });
 
     alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason },
+      { chainId, walletId, reason },
       'Alchemy webhook address sync add succeeded'
     );
     return true;
@@ -335,10 +335,8 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
       {
         ...safeProviderError('alchemy', 'webhook_address_add', error),
         chainId,
-        address: normalizedAddress,
         walletId,
-        reason,
-        status: error.status
+        reason
       },
       'Alchemy webhook address sync add failed'
     );
@@ -352,7 +350,7 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
 
   if (!chainConfig) {
     alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason },
+      { chainId, walletId, reason },
       'Alchemy webhook address sync remove skipped for unsupported chain'
     );
     return false;
@@ -364,7 +362,6 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
     alchemyAddressSyncLogger.info(
       {
         chainId,
-        address: normalizedAddress,
         walletId,
         reason,
         remainingWalletCount
@@ -377,7 +374,7 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
   ensureAlchemyWebhookSyncConfigured(chainId);
 
   alchemyAddressSyncLogger.info(
-    { chainId, address: normalizedAddress, walletId, reason },
+    { chainId, walletId, reason },
     'Alchemy webhook address sync remove started'
   );
 
@@ -388,7 +385,7 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
     });
 
     alchemyAddressSyncLogger.info(
-      { chainId, address: normalizedAddress, walletId, reason },
+      { chainId, walletId, reason },
       'Alchemy webhook address sync remove succeeded'
     );
     return true;
@@ -397,10 +394,8 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
       {
         ...safeProviderError('alchemy', 'webhook_address_remove', error),
         chainId,
-        address: normalizedAddress,
         walletId,
-        reason,
-        status: error.status
+        reason
       },
       'Alchemy webhook address sync remove failed'
     );
@@ -464,8 +459,6 @@ export async function syncAlchemyWebhookAddressOnWalletUpdate(previousWallet, up
     alchemyAddressSyncLogger.info(
       {
         walletId: updatedWallet?.id ?? previousWallet?.id ?? null,
-        previousAddress,
-        nextAddress,
         previousChains,
         nextChains
       },

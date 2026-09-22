@@ -24,6 +24,7 @@ process.env.ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV = 'false';
 
 const { default: request } = await import('supertest');
 const { createApp } = await import('../src/app.js');
+const { getOperationalSignalState } = await import('../src/modules/operations/operationalState.js');
 const app = createApp();
 
 function webhookBody(webhookId, network) {
@@ -77,9 +78,13 @@ test('valid Base webhook signature is accepted', async () => {
 });
 
 test('missing signature is rejected in production', async () => {
+  const before = getOperationalSignalState().webhook.rejectionCount;
   const response = await postWebhook(webhookBody(ethereumWebhookId, 'ETH_MAINNET'));
   assert.equal(response.status, 401);
   assert.equal(response.body.error.code, 'WEBHOOK_SIGNATURE_MISSING');
+  const webhookStatus = getOperationalSignalState().webhook;
+  assert.equal(webhookStatus.rejectionCount, before + 1);
+  assert.equal(webhookStatus.lastFailure.errorCode, 'WEBHOOK_SIGNATURE_MISSING');
 });
 
 for (const [chain, webhookId, network, secret, otherSecret] of [

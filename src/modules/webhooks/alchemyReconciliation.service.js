@@ -8,6 +8,11 @@ import {
   listAlchemyWebhookWatchedAddresses,
   removeAddressFromAlchemyWebhookSync
 } from './alchemyAddressSync.service.js';
+import { safeErrorDetails } from '../../utils/safeError.js';
+import {
+  recordAlchemySyncFailure,
+  recordAlchemySyncSuccess
+} from '../operations/operationalState.js';
 
 const reconciliationLogger = logger.child({ module: 'reconcile-alchemy-webhook-addresses' });
 const CHAIN_IDS = [ETHEREUM_MAINNET_CHAIN_ID, BASE_MAINNET_CHAIN_ID];
@@ -67,7 +72,13 @@ export async function reconcileAlchemyWebhookAddresses({
           } catch (error) {
             failures.push(error);
             report.failedCount += 1;
-            reconciliationLogger.error({ err: error, chainId, address }, 'Alchemy reconciliation add failed');
+            recordAlchemySyncFailure(error);
+            reconciliationLogger.error({
+              provider: 'alchemy',
+              operation: 'reconciliation_add',
+              chainId,
+              ...safeErrorDetails(error)
+            }, 'Alchemy reconciliation add failed');
           }
         }
 
@@ -81,17 +92,32 @@ export async function reconcileAlchemyWebhookAddresses({
           } catch (error) {
             failures.push(error);
             report.failedCount += 1;
-            reconciliationLogger.error({ err: error, chainId, address }, 'Alchemy reconciliation remove failed');
+            recordAlchemySyncFailure(error);
+            reconciliationLogger.error({
+              provider: 'alchemy',
+              operation: 'reconciliation_remove',
+              chainId,
+              ...safeErrorDetails(error)
+            }, 'Alchemy reconciliation remove failed');
           }
         }
       }
     } catch (error) {
       failures.push(error);
       report.failedCount += 1;
-      reconciliationLogger.error({ err: error, chainId }, 'Alchemy reconciliation could not compare addresses');
+      recordAlchemySyncFailure(error);
+      reconciliationLogger.error({
+        provider: 'alchemy',
+        operation: 'reconciliation_compare',
+        chainId,
+        ...safeErrorDetails(error)
+      }, 'Alchemy reconciliation could not compare addresses');
     }
 
     reports.push(report);
+    if (report.failedCount === 0) {
+      recordAlchemySyncSuccess();
+    }
     reconciliationLogger.info(report, dryRun ? 'Alchemy reconciliation dry-run result' : 'Alchemy reconciliation result');
   }
 

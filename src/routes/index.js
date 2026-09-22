@@ -10,11 +10,14 @@ import { positionsRouter } from '../modules/positions/positions.routes.js';
 import { alchemyWebhooksRouter } from '../modules/webhooks/alchemy.routes.js';
 import { walletsRouter } from '../modules/wallets/wallets.routes.js';
 import { checkDatabaseReadiness } from '../db/readiness.js';
+import { createOperationsRouter } from '../modules/operations/operations.routes.js';
 
 export function createApiRouter({
   checkDatabase = checkDatabaseReadiness,
   isWorkerReady = () => true,
-  isShuttingDown = () => false
+  isShuttingDown = () => false,
+  operationsToken = '',
+  getOperationalStatus = async () => ({ status: 'unavailable' })
 } = {}) {
   const router = Router();
 
@@ -39,6 +42,8 @@ export function createApiRouter({
       return res.status(503).json({ status: 'not_ready' });
     }
   });
+
+  router.use(createOperationsRouter({ token: operationsToken, getStatus: getOperationalStatus }));
 
   router.use(authRouter);
   router.use(walletsRouter);

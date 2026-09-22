@@ -156,6 +156,47 @@ overrides apply only to Ethereum dry-runs; live reconciliation always reads Alch
 
 Configure the deployment host to use `/api/v1/ready` for traffic gating and `/api/v1/health` for process liveness. The server checks PostgreSQL before opening its HTTP listener and exits nonzero if the startup check fails; the host should restart it. The portfolio snapshot job is not a readiness dependency.
 
+### Internal operational diagnostics
+
+Set `OPERATIONS_DIAGNOSTICS_TOKEN` to a random value of at least 32 characters to
+enable `GET /api/v1/operations/status`. Leave it empty to disable the endpoint;
+disabled requests return `404`. The endpoint requires the value in the
+`X-Operations-Token` header. It does not use ordinary wallet-user JWTs, because
+the application has no administrator role and system-wide queue counts must not
+be available to regular users.
+
+```bash
+curl -H 'X-Operations-Token: replace_with_your_operations_token' \
+  https://backend.example.test/api/v1/operations/status
+```
+
+The response contains aggregate process uptime, PostgreSQL availability,
+notification worker heartbeat timestamps, outbox counts, oldest pending-job age,
+stale processing count, webhook and Alchemy sync success/failure counters, and
+portfolio snapshot run state. It contains no wallet addresses, payloads, provider
+URLs, credentials, or stack traces. Keep this endpoint restricted to an internal
+network or monitoring probe and store the token in the deployment secret store.
+The token header is redacted from HTTP logs.
+
+During the internal test release, monitor these signals and structured log events:
+
+- alert immediately when `/api/v1/ready` returns `503` repeatedly or database
+  readiness failures repeat;
+- alert on a process restart loop, using the `process_start` event and process
+  `startedAt`/`uptimeSeconds` diagnostics;
+- alert when `notificationOutbox.failedCount` is above zero;
+- alert when `oldestPendingAgeSeconds` exceeds 600 seconds or
+  `staleProcessingCount` is above zero;
+- alert when the worker has started but `lastCycleCompletedAt` stops advancing for
+  more than two polling intervals;
+- investigate repeated `webhook.failureCount` increases, `Alchemy webhook rejected`
+  bursts, or Alchemy wallet sync/reconciliation failure logs;
+- investigate a portfolio snapshot `lastRunFailedAt` newer than
+  `lastRunSucceededAt`, while keeping snapshots outside readiness.
+
+These checks require only HTTP probing and structured log collection. No external
+monitoring vendor is required.
+
 ## Proxy, rate limits, and CORS
 
 By default `TRUST_PROXY_HOPS=0` and `TRUST_PROXY_CIDRS` is empty: Express uses

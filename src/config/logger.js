@@ -7,6 +7,7 @@ const sensitiveHeaders = [
   'cookie',
   'set-cookie',
   'x-api-key',
+  'x-operations-token',
   'x-alchemy-token',
   'x-alchemy-signature'
 ];

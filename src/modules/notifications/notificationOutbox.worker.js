@@ -4,16 +4,28 @@ import {
   NOTIFICATION_OUTBOX_POLL_INTERVAL_MS,
   processNotificationOutboxBatch
 } from './notifications.service.js';
+import { safeErrorDetails } from '../../utils/safeError.js';
 
 export class NotificationOutboxWorker {
   constructor({
     intervalMs = NOTIFICATION_OUTBOX_POLL_INTERVAL_MS,
-    batchSize = NOTIFICATION_OUTBOX_BATCH_SIZE
+    batchSize = NOTIFICATION_OUTBOX_BATCH_SIZE,
+    processBatch = processNotificationOutboxBatch,
+    now = () => new Date()
   } = {}) {
     this.intervalMs = intervalMs;
     this.batchSize = batchSize;
     this.timer = null;
     this.running = false;
+    this.processBatch = processBatch;
+    this.now = now;
+    this.startedAt = null;
+    this.lastCycleStartedAt = null;
+    this.lastCycleCompletedAt = null;
+    this.lastCycleSucceededAt = null;
+    this.lastErrorAt = null;
+    this.lastError = null;
+    this.lastResult = null;
     this.logger = logger.child({ module: 'notification-outbox-worker' });
   }
 
@@ -24,9 +36,12 @@ export class NotificationOutboxWorker {
     }
 
     this.running = true;
+    this.lastCycleStartedAt = this.now().toISOString();
 
     try {
-      const result = await processNotificationOutboxBatch({ limit: this.batchSize });
+      const result = await this.processBatch({ limit: this.batchSize });
+      this.lastCycleSucceededAt = this.now().toISOString();
+      this.lastResult = { ...result };
 
       if (result.claimedCount > 0) {
         this.logger.info(
@@ -40,13 +55,17 @@ export class NotificationOutboxWorker {
         );
       }
     } catch (error) {
-      this.logger.error({ err: error }, 'Notification outbox cycle failed');
+      this.lastErrorAt = this.now().toISOString();
+      this.lastError = safeErrorDetails(error);
+      this.logger.error(this.lastError, 'Notification outbox cycle failed');
     } finally {
+      this.lastCycleCompletedAt = this.now().toISOString();
       this.running = false;
     }
   }
 
   async start() {
+    this.startedAt = this.now().toISOString();
     this.logger.info(
       {
         intervalMs: this.intervalMs,
@@ -72,5 +91,19 @@ export class NotificationOutboxWorker {
 
   isStarted() {
     return this.timer !== null;
+  }
+
+  getStatus() {
+    return {
+      started: this.isStarted(),
+      running: this.running,
+      startedAt: this.startedAt,
+      lastCycleStartedAt: this.lastCycleStartedAt,
+      lastCycleCompletedAt: this.lastCycleCompletedAt,
+      lastCycleSucceededAt: this.lastCycleSucceededAt,
+      lastErrorAt: this.lastErrorAt,
+      lastError: this.lastError && { ...this.lastError },
+      lastResult: this.lastResult && { ...this.lastResult }
+    };
   }
 }

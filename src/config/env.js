@@ -27,6 +27,10 @@ const envSchema = z.object({
   DATABASE_MIGRATION_LOCK_TIMEOUT_MS: z.coerce.number().int().min(1).default(5_000),
   DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(1).default(300_000),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
+  OPERATIONS_DIAGNOSTICS_TOKEN: z.string().refine(
+    (value) => value === '' || value.trim().length >= 32,
+    'OPERATIONS_DIAGNOSTICS_TOKEN must be empty or at least 32 characters long'
+  ).default(''),
   JWT_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(60 * 60 * 24 * 7),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   GLOBAL_API_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),

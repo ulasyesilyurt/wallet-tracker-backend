@@ -166,6 +166,18 @@ test('SIGTERM closes the HTTP server and database pool before exit', async () =>
       delay(3_000, undefined, { ref: false }).then(() => ({ code: null, signal: 'timeout' }))
     ]);
     assert.deepEqual(result, { code: 0, signal: null }, processHandle.output());
+    const structuredLogs = processHandle.output().trim().split('\n')
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line));
+    const startup = structuredLogs.find((entry) => entry.event === 'process_start');
+    const shutdownStarted = structuredLogs.find((entry) => entry.event === 'graceful_shutdown_started');
+    const shutdownCompleted = structuredLogs.find((entry) => entry.event === 'graceful_shutdown_completed');
+    assert.equal(startup.appVersion, '1.0.0');
+    assert.equal(startup.nodeEnv, 'test');
+    assert.ok(startup.processStartedAt);
+    assert.equal(shutdownStarted.reason, 'SIGTERM');
+    assert.equal(shutdownCompleted.reason, 'SIGTERM');
+    assert.equal(shutdownCompleted.exitCode, 0);
     await assert.rejects(fetch(`http://127.0.0.1:${port}/api/v1/health`));
   } finally {
     if (processHandle.child.exitCode == null) {

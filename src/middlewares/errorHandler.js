@@ -1,5 +1,6 @@
 import { ZodError } from 'zod';
 import { logger } from '../config/logger.js';
+import { safeErrorDetails } from '../utils/safeError.js';
 
 export function notFoundHandler(req, res) {
   res.status(404).json({
@@ -36,7 +37,10 @@ export function errorHandler(error, req, res, next) {
       'Handled request error'
     );
   } else {
-    logger.error({ err: error, path: req.originalUrl }, 'Unhandled request error');
+    logger.error(
+      { ...safeErrorDetails(error), path: req.originalUrl },
+      'Unhandled request error'
+    );
   }
 
   return res.status(error.statusCode || 500).json({

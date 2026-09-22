@@ -233,22 +233,13 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
   });
 
   webhookLogger.info({
+    chainId,
     transactionHash: activity.hash,
     blockNumber,
-    contractAddress: activityKind.contractAddress,
-    fromAddress,
-    toAddress,
     category: activity.category,
     eventType: activityKind.eventType,
-    fromAddressCandidateWalletIds: fromWallets.map((wallet) => wallet.id),
-    toAddressCandidateWalletIds: toWallets.map((wallet) => wallet.id),
-    candidateWalletIds: candidateWalletList.map((wallet) => wallet.id),
-    candidateWalletUsers: candidateWalletList.map((wallet) => ({
-      walletId: wallet.id,
-      userId: wallet.userId,
-      trackTypes: wallet.trackTypes
-    })),
-    matchedWalletIds: lifecycle.matchedWalletIds,
+    candidateWalletCount: candidateWalletList.length,
+    matchedWalletCount: wallets.length,
     matched: lifecycle.matched
   }, 'Normalized Alchemy webhook activity');
 
@@ -257,17 +248,13 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
       candidateWalletList.length === 0 ? 'address_mismatch' : 'track_type_filter';
 
     webhookLogger.info({
+      chainId,
       transactionHash: activity.hash,
       blockNumber,
       eventType: activityKind.eventType,
       outcome: 'rejected',
       rejectionReason,
-      candidateWalletIds: candidateWalletList.map((wallet) => wallet.id),
-      candidateWalletUsers: candidateWalletList.map((wallet) => ({
-        walletId: wallet.id,
-        userId: wallet.userId,
-        trackTypes: wallet.trackTypes
-      }))
+      candidateWalletCount: candidateWalletList.length
     }, 'Alchemy webhook activity did not match any tracked wallet');
     return [];
   }
@@ -343,18 +330,13 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
 
     if (impersonationCheck.shouldReject) {
       webhookLogger.info({
+        chainId,
         transactionHash: activity.hash,
         blockNumber,
-        contractAddress: activityKind.contractAddress,
-        fromAddress,
-        toAddress,
         eventType: 'token_transfer',
-        assetSymbol: activity.asset ?? null,
-        assetName: activity.asset ?? null,
         normalizedSymbol: impersonationCheck.normalizedSymbol,
         normalizedName: impersonationCheck.normalizedName,
-        matchedWalletIds: lifecycle.matchedWalletIds,
-        matched: lifecycle.matched,
+        matchedWalletCount: wallets.length,
         outcome: 'rejected',
         rejectionReason: impersonationCheck.rejectionReason
       }, 'Alchemy ERC-20 transfer skipped because token impersonates native ETH');
@@ -395,13 +377,10 @@ function normalizeAlchemyActivityToEvents({ activity, chainId, createdAt, tracke
 
   if (!hasPositiveNativeWei && !hasPositiveNativeValue) {
     webhookLogger.info({
+      chainId,
       transactionHash: activity.hash,
       blockNumber,
-      fromAddress,
-      toAddress,
       category: activity.category,
-      rawContractValue: nativeWei,
-      activityValue: nativeValue,
       outcome: 'rejected',
       rejectionReason: 'zero_native_amount'
     }, 'Alchemy native transfer skipped because amount is zero');
@@ -476,15 +455,9 @@ export async function handleAlchemyWebhook(payload) {
 
   webhookLogger.info({
     webhookId: payload.webhookId,
-    network: payload.event.network,
+    chainId,
     activityCount: payload.event.activity.length,
     trackedWalletsConsidered: trackedWallets.length,
-    trackedWallets: trackedWallets.map((wallet) => ({
-      walletId: wallet.id,
-      userId: wallet.userId,
-      address: wallet.address,
-      trackTypes: wallet.trackTypes
-    })),
     normalizedEventsCount: normalizedEvents.length
   }, 'Processed Alchemy webhook payload');
 

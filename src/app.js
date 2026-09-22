@@ -13,7 +13,7 @@ function shouldCaptureRawBody(req) {
   return req.originalUrl?.startsWith('/api/v1/webhooks/alchemy');
 }
 
-export function createApp(readinessOptions = {}, networkConfig = env) {
+export function createApp(runtimeOptions = {}, networkConfig = env) {
   const app = express();
   app.set('trust proxy', createTrustProxy(networkConfig));
 
@@ -54,7 +54,10 @@ export function createApp(readinessOptions = {}, networkConfig = env) {
     app.use('/api/v1', globalApiRateLimiter);
   }
 
-  app.use('/api/v1', createApiRouter(readinessOptions));
+  app.use('/api/v1', createApiRouter({
+    ...runtimeOptions,
+    operationsToken: runtimeOptions.operationsToken ?? networkConfig.OPERATIONS_DIAGNOSTICS_TOKEN
+  }));
   app.use(notFoundHandler);
   app.use(errorHandler);
 

@@ -1,11 +1,15 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { parseAllowedOrigins, parseProxyCidrs } from './network.js';
 
 dotenv.config();
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
+  TRUST_PROXY_CIDRS: z.string().default(''),
+  CORS_ALLOWED_ORIGINS: z.string().default(''),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   DATABASE_SSL_MODE: z.string().refine(
     (value) => ['disable', 'verify-full'].includes(value),
@@ -116,6 +120,35 @@ const envSchema = z.object({
   ETHEREUM_TRACE_TO_ADDRESS: z.string().optional(),
   ETHEREUM_TRACE_TX_HASH: z.string().optional()
 }).superRefine((config, context) => {
+  let proxyCidrs = [];
+  try {
+    proxyCidrs = parseProxyCidrs(config.TRUST_PROXY_CIDRS);
+  } catch (error) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['TRUST_PROXY_CIDRS'],
+      message: error.message
+    });
+  }
+
+  if ((config.TRUST_PROXY_HOPS === 0) !== (proxyCidrs.length === 0)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['TRUST_PROXY_HOPS'],
+      message: 'TRUST_PROXY_HOPS and TRUST_PROXY_CIDRS must be configured together'
+    });
+  }
+
+  try {
+    parseAllowedOrigins(config.CORS_ALLOWED_ORIGINS, config.NODE_ENV);
+  } catch (error) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['CORS_ALLOWED_ORIGINS'],
+      message: error.message
+    });
+  }
+
   if (config.NODE_ENV !== 'production') {
     return;
   }

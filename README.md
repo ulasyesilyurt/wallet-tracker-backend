@@ -147,6 +147,50 @@ overrides apply only to Ethereum dry-runs; live reconciliation always reads Alch
 
 Configure the deployment host to use `/api/v1/ready` for traffic gating and `/api/v1/health` for process liveness. The server checks PostgreSQL before opening its HTTP listener and exits nonzero if the startup check fails; the host should restart it. The portfolio snapshot job is not a readiness dependency.
 
+## Proxy, rate limits, and CORS
+
+By default `TRUST_PROXY_HOPS=0` and `TRUST_PROXY_CIDRS` is empty: Express uses
+the socket address as the client IP and ignores client-supplied
+`X-Forwarded-For`. For one reverse proxy, configure both settings with that
+proxy's source address or narrow CIDR, for example:
+
+```env
+TRUST_PROXY_HOPS=1
+TRUST_PROXY_CIDRS=10.0.0.5/32
+```
+
+The proxy must replace or append `X-Forwarded-For` with the actual client IP,
+and its connection to the backend must come from the configured address.
+Express trusts at most the configured number of hops and only listed proxy
+addresses. Keep the backend reachable only through the proxy; a direct client
+using the proxy's allowed source address cannot be distinguished by IP alone.
+Invalid or incomplete proxy settings fail startup. If the deployment has more
+than one proxy, list only the expected proxy CIDRs and set the actual hop count
+(1 through 5).
+
+The login, registration, and global API limits use Express's resolved client IP.
+The existing limits and response shape are unchanged. Their in-memory store is
+process-local, so these limits are suitable for **one backend instance only**;
+multiple instances would each have an independent counter. The global API
+limit still excludes health, readiness, and Alchemy webhook requests.
+
+Development CORS allows local browser and React Native tooling. In production,
+`CORS_ALLOWED_ORIGINS` is a comma-separated list of exact HTTPS browser origins
+(scheme, hostname, and optional port, without a trailing slash), for example:
+
+```env
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+An empty production list allows no browser origins, which is appropriate while
+the first-party client is native mobile only. Requests without an `Origin` header,
+including native React Native, server-to-server, and Alchemy webhook requests,
+still pass. Disallowed browser origins receive HTTP 403. Allowed preflight
+requests support the existing HTTP methods and requested headers, including
+`Authorization` and `Content-Type`. Authentication uses bearer tokens rather
+than browser cookies, so CORS credentials are not enabled. CORS is a browser
+access rule; it does not authenticate API or webhook requests.
+
 ## Production database
 
 Use a PostgreSQL service with automated backups and a verified TLS endpoint. Store

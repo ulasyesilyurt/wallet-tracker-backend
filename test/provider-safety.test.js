@@ -42,9 +42,31 @@ function jsonResponse(data) {
   return { ok: true, status: 200, json: async () => data };
 }
 
-function waitForAbort(_url, options) {
-  return new Promise((_, reject) => {
-    options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+function abortAwareFetch(aborts) {
+  return (_url, options) => new Promise((_, reject) => {
+    const signal = options?.signal;
+    if (!signal) {
+      reject(new Error('Expected a provider request abort signal'));
+      return;
+    }
+
+    // AbortSignal.timeout uses an unref'ed timer, so a mocked fetch needs a live
+    // handle while it waits. The watchdog also makes a missing abort fail clearly.
+    const watchdog = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      reject(new Error('Provider request mock was not aborted'));
+    }, 5_000);
+    function onAbort() {
+      clearTimeout(watchdog);
+      signal.removeEventListener('abort', onAbort);
+      aborts.push(signal.reason);
+      reject(signal.reason);
+    }
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
   });
 }
 
@@ -111,13 +133,16 @@ test('Alchemy token balance item cap marks an oversized page incomplete', async 
 
 test('Alchemy and CoinGecko pricing time out and preserve unpriced fallback', async () => {
   const requested = [];
+  const aborts = [];
+  const mockedFetch = abortAwareFetch(aborts);
   global.fetch = (url, options) => {
     requested.push(String(url).includes('coingecko') ? 'coingecko' : 'alchemy');
-    return waitForAbort(url, options);
+    return mockedFetch(url, options);
   };
   const price = await fetchChainEthUsdPrice('ethereum-mainnet');
   assert.equal(price, null);
   assert.deepEqual(requested, ['alchemy', 'coingecko']);
+  assert.deepEqual(aborts.map((reason) => reason?.name), ['TimeoutError', 'TimeoutError']);
 });
 
 test('Alchemy ETH price keeps its last successful value after provider timeouts', async () => {
@@ -130,8 +155,10 @@ test('Alchemy ETH price keeps its last successful value after provider timeouts'
     });
     assert.equal(await fetchChainEthUsdPrice('ethereum-mainnet'), 3500);
     now += 5 * 60 * 1000 + 1;
-    global.fetch = waitForAbort;
+    const aborts = [];
+    global.fetch = abortAwareFetch(aborts);
     assert.equal(await fetchChainEthUsdPrice('ethereum-mainnet'), 3500);
+    assert.deepEqual(aborts.map((reason) => reason?.name), ['TimeoutError', 'TimeoutError']);
   } finally {
     Date.now = realNow;
   }
@@ -176,11 +203,13 @@ test('Zerion timeout returns partial data and reuses last known good cache', asy
     assert.equal(good.isPartial, false);
 
     now += 61_000;
-    global.fetch = waitForAbort;
+    const aborts = [];
+    global.fetch = abortAwareFetch(aborts);
     const fallback = await fetchWalletPositionsForChain(target);
     assert.equal(fallback.positions.length, 1);
     assert.equal(fallback.isPartial, true);
     assert.deepEqual(fallback.partialReasons, ['ZERION_TIMEOUT:ethereum-mainnet']);
+    assert.deepEqual(aborts.map((reason) => reason?.name), ['TimeoutError']);
   } finally {
     Date.now = realNow;
   }
@@ -223,7 +252,8 @@ test('positions API returns a partial response when Zerion times out', async () 
   const userId = randomUUID();
   const walletId = randomUUID();
   const address = wallet().address;
-  global.fetch = waitForAbort;
+  const aborts = [];
+  global.fetch = abortAwareFetch(aborts);
   await query('INSERT INTO app_users (id, email) VALUES ($1, $2)', [userId, `provider-${userId}@example.test`]);
   try {
     await query(
@@ -237,6 +267,7 @@ test('positions API returns a partial response when Zerion times out', async () 
     assert.equal(response.status, 200);
     assert.equal(response.body.data.isPartial, true);
     assert.deepEqual(response.body.data.partialReasons, ['ZERION_TIMEOUT:ethereum-mainnet']);
+    assert.deepEqual(aborts.map((reason) => reason?.name), ['TimeoutError']);
   } finally {
     await query('DELETE FROM tracked_wallets WHERE id = $1', [walletId]);
     await query('DELETE FROM app_users WHERE id = $1', [userId]);

@@ -1,4 +1,5 @@
 import { HttpError } from '../../utils/httpError.js';
+import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { BASE_MAINNET_CHAIN_ID, ETHEREUM_MAINNET_CHAIN_ID } from '../chains/chains.config.js';
 import { findWalletById, findWalletByIdOnly } from '../wallets/wallets.repository.js';
@@ -10,7 +11,7 @@ const HOLDINGS_CACHE_TTL_MS = 120 * 1000;
 const AGGREGATED_DEGRADED_HOLDINGS_CACHE_TTL_MS = 15 * 1000;
 const PER_CHAIN_DEGRADED_HOLDINGS_CACHE_TTL_MS = 60 * 1000;
 const LAST_KNOWN_GOOD_HOLDINGS_CACHE_TTL_MS = 15 * 60 * 1000;
-const HOLDINGS_CHAIN_TIMEOUT_MS = 8 * 1000;
+const HOLDINGS_CHAIN_TIMEOUT_MS = env.HOLDINGS_CHAIN_TIMEOUT_MS;
 const PERSISTED_HOLDINGS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const holdingsCache = new Map();
 const lastKnownGoodHoldingsCache = new Map();

@@ -11,6 +11,7 @@ const envSchema = z.object({
   TRUST_PROXY_CIDRS: z.string().default(''),
   CORS_ALLOWED_ORIGINS: z.string().default(''),
   PROVIDER_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5_000),
+  HOLDINGS_CHAIN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
   ZERION_MAX_PAGES: z.coerce.number().int().min(1).max(100).default(10),
   ALCHEMY_TOKEN_BALANCE_MAX_PAGES: z.coerce.number().int().min(1).max(100).default(5),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),

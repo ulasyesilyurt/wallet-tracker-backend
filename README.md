@@ -1,283 +1,519 @@
 # Wallet Tracker Backend
 
-Node.js + Express backend for a React Native wallet tracking app. This backend now includes wallet management APIs, a webhook-first ingestion path for Alchemy address activity, and an Ethereum polling tracker kept as an optional fallback/debug tool.
+Backend service for Wallet Tracker, an alert-first crypto wallet monitoring application.
+
+This service provides wallet management, portfolio aggregation, blockchain event ingestion, notification generation, push delivery, caching, operational diagnostics, and release-oriented production safeguards.
+
+The mobile application is maintained in a separate repository.
+
+## Overview
+
+Wallet Tracker Backend is built around a webhook-first architecture.
+
+Alchemy Address Activity webhooks are the primary production ingestion path for real-time wallet events. Incoming activity is normalized and persisted, then eligible events are converted into logical notifications and delivered to registered devices through Firebase Cloud Messaging.
+
+The backend also aggregates wallet balances, token holdings, DeFi positions, transaction history, and portfolio summaries across supported networks.
+
+Current network support:
+
+- Ethereum
+- Base
+
+## Tech Stack
+
+- Node.js
+- Express
+- PostgreSQL
+- Firebase Admin SDK
+- Alchemy
+- Zerion
+- CoinGecko fallback pricing
+- JWT authentication
+- SQL migrations
+- Jest / Supertest
 
 ## Architecture
 
-The backend is split into small layers so blockchain ingestion and push delivery can be added without rewriting the API surface:
+Main backend areas:
 
-- `src/config`: environment parsing and structured logging
-- `src/db`: PostgreSQL pool, query helper, and SQL migrations
-- `src/modules/wallets`: request validation, controllers, service logic, and repository queries
-- `src/modules/ethereum`: Ethereum polling tracker, log normalization, and metadata lookup
-- `src/modules/events`: shared wallet event persistence and query APIs
-- `src/modules/webhooks`: webhook payload validation and Alchemy event ingestion
-- `src/middlewares`: shared request validation and centralized error handling
-- `src/routes`: API route registration
-
-### Real-time notification architecture
-
-1. The mobile app registers user devices and tracked wallets through the API.
-2. Alchemy webhooks deliver address activity to the backend as the primary production ingestion path for real-time notifications.
-3. The webhook layer validates the payload, normalizes native/token/NFT transfers, and stores them in `wallet_events`.
-4. The Ethereum tracker can still poll confirmed blocks as an optional fallback/debug path when needed.
-5. A notification worker creates one durable `notifications` row per alert-worthy wallet event, even when the owner has no active device tokens.
-6. The worker sends Firebase Cloud Messaging pushes to active devices and records each attempt in `notification_deliveries` for audit and debugging. Read state belongs to the logical notification.
-
-The outbox retries transient FCM failures up to three attempts with backoff. Each retry skips devices whose delivery row is already `delivered` and devices with a terminal failure. Firebase-confirmed invalid registration tokens are deactivated for their owning user. An outbox job is `sent` once no active device needs another attempt; exhausted transient failures leave the job `failed` while the logical alert remains in history. Push delivery is at least once: if FCM accepts a message but the process stops before PostgreSQL records `delivered`, the next attempt may send that device a duplicate.
-
-### Recommended operating mode
-
-- Primary real-time mode:
-  - use `POST /api/v1/webhooks/alchemy`
-  - keep `ENABLE_ETHEREUM_TRACKER=false`
-  - this is the recommended production setup
-- Polling tracker mode:
-  - set `ENABLE_ETHEREUM_TRACKER=true`
-  - use it only for local tracker tests, fallback recovery, or debugging specific historical ranges
-  - it is not the preferred primary path when the tracker is far behind because block scanning and RPC rate limits can make catch-up slow
-
-This structure keeps API logic, chain-specific ingestion, and later notification workers separated so more chains can be added as parallel modules instead of being mixed into route handlers.
-
-## Database schema
-
-The schema is defined in [`src/db/migrations/001_initial_schema.sql`](/Users/ulas/Documents/New%20project/src/db/migrations/001_initial_schema.sql).
-The tracking-specific additions are in [`src/db/migrations/002_wallet_event_tracking.sql`](/Users/ulas/Documents/New%20project/src/db/migrations/002_wallet_event_tracking.sql) and [`src/db/migrations/003_native_eth_transfer_support.sql`](/Users/ulas/Documents/New%20project/src/db/migrations/003_native_eth_transfer_support.sql).
-
-Core tables:
-
-- `app_users`: application users
-- `device_tokens`: FCM tokens per user/device
-- `tracked_wallets`: wallet addresses a user wants to monitor
-- `wallet_track_preferences`: per-wallet event subscriptions such as token transfers or NFT sales
-- `wallet_events`: normalized blockchain events ready for display and notification
-- `notifications`: one logical alert per wallet event, including read state
-- `notification_deliveries`: FCM delivery attempts and status
-- `chain_sync_state`: persisted block cursor so the Ethereum tracker can resume safely after restarts
-
-The schema uses enums for wallet tracking types and delivery states, unique constraints to prevent duplicate tracking rows, and indexes for the most common lookups.
-
-## API endpoints
-
-Base URL: `/api/v1`
-
-### Add wallet
-
-`POST /users/:userId/wallets`
-
-```json
-{
-  "chainId": "ethereum-mainnet",
-  "address": "0x1234567890abcdef1234567890abcdef12345678",
-  "label": "Whale wallet",
-  "trackTypes": ["token_transfer", "nft_buy", "nft_sell"]
-}
+```txt
+src/
+  config/                Environment and logging configuration
+  db/                    PostgreSQL pool, helpers, and migrations
+  middlewares/           Authentication, validation, errors, rate limits
+  modules/
+    auth/                Authentication
+    wallets/             Wallet management
+    holdings/            Token and native balance aggregation
+    positions/           DeFi / protocol positions
+    portfolioSummary/    Combined wallet portfolio summaries
+    events/              Wallet event storage and history
+    webhooks/            Alchemy webhook ingestion
+    notifications/       Notification history and read state
+    notificationOutbox/  Durable push delivery queue
+    operations/          Internal operational diagnostics
+  routes/                API route registration
 ```
 
-### List wallets
+## Real-Time Notification Flow
 
-`GET /users/:userId/wallets`
+The production notification path is:
 
-### Delete wallet
-
-`DELETE /users/:userId/wallets/:walletId`
-
-### Register device token
-
-`POST /users/:userId/device-tokens`
-
-```json
-{
-  "token": "your-device-fcm-token",
-  "platform": "ios"
-}
+```txt
+Blockchain activity
+        ↓
+Alchemy Address Activity Webhook
+        ↓
+Webhook signature validation
+        ↓
+Event normalization
+        ↓
+wallet_events
+        ↓
+Logical notification
+        ↓
+Notification Outbox
+        ↓
+Firebase Cloud Messaging
+        ↓
+Android / APNs
 ```
 
-### Delete device token
+Key properties:
 
-`DELETE /users/:userId/device-tokens`
+- Alchemy webhooks are the primary real-time ingestion mechanism.
+- Webhook signatures are validated before ingestion.
+- Ethereum and Base use separate webhook IDs and signing secrets.
+- Notification history exists independently of active FCM tokens.
+- Read / unread state belongs to the logical notification.
+- FCM transient failures are retried with backoff.
+- Invalid registration tokens are automatically deactivated.
+- Delivery attempts are stored for diagnostics.
 
-```json
-{
-  "token": "your-device-fcm-token"
-}
+## Recommended Runtime Mode
+
+For normal production operation:
+
+```env
+ENABLE_ETHEREUM_TRACKER=false
 ```
 
-### Wallet events
+Use:
 
-`GET /wallets/:walletId/events`
+```txt
+POST /api/v1/webhooks/alchemy
+```
 
-Returns normalized wallet events sorted by `occurredAt`, `createdAt`, then event ID,
-all newest first. The response keeps `data` as an array for existing mobile clients.
-It now also includes a top-level `pagination` object with `limit`, `offset`, and
-`hasMore`. `limit` defaults to 50, may be 1–100, and `offset` defaults to 0;
-invalid values return `400`. For example, request
-`/wallets/:walletId/events?limit=50&offset=50` for the second page. The existing
-`groupTransactions=true` option remains available and groups complete transactions
-within the selected page. Events from a transaction split across pages remain
-individual event items so the API does not present an incomplete purchase or sale
-as a complete transaction. A mobile load-more flow is needed to display older pages.
+as the primary real-time ingestion path.
 
-### Alchemy webhook
+The Ethereum polling tracker remains available only for fallback, debugging, or local recovery workflows.
 
-`POST /webhooks/alchemy`
+## API Base Path
 
-Accepts Alchemy Address Activity webhook payloads and stores matching wallet activity in `wallet_events`.
-Signed deliveries must include a configured Ethereum or Base `webhookId`, its matching
-network, and the `X-Alchemy-Signature` generated with that webhook's signing secret.
-This endpoint remains the primary real-time notification ingestion path.
+```txt
+/api/v1
+```
 
-### Recover Alchemy wallet subscriptions
+## Main API Areas
 
-Wallet create, update, and delete save the database change before synchronizing Alchemy.
-If synchronization fails, the API returns `503` with `ALCHEMY_WEBHOOK_SYNC_FAILED` in
-the existing error envelope. The wallet change was saved; run reconciliation instead
-of assuming the operation was rolled back.
+### Authentication
 
-With `ALCHEMY_NOTIFY_API_KEY` and both chain-specific webhook IDs configured, preview
-and then repair Ethereum and Base subscriptions:
+Authentication is handled through JWT-based application sessions.
+
+### Wallet Management
+
+Typical wallet operations include:
+
+```txt
+POST   /api/v1/users/:userId/wallets
+GET    /api/v1/users/:userId/wallets
+DELETE /api/v1/users/:userId/wallets/:walletId
+```
+
+Wallet configuration includes:
+
+- Address
+- Label
+- Network selection
+- Notification preferences
+
+### Device Tokens
+
+Register a device:
+
+```txt
+POST /api/v1/users/:userId/device-tokens
+```
+
+Remove a device token:
+
+```txt
+DELETE /api/v1/users/:userId/device-tokens
+```
+
+Supported platforms include Android and iOS.
+
+### Wallet Events
+
+```txt
+GET /api/v1/wallets/:walletId/events
+```
+
+Wallet history supports pagination.
+
+Example:
+
+```txt
+GET /api/v1/wallets/:walletId/events?limit=50&offset=50
+```
+
+The response includes pagination metadata such as:
+
+- `limit`
+- `offset`
+- `hasMore`
+
+### Alchemy Webhook
+
+```txt
+POST /api/v1/webhooks/alchemy
+```
+
+The endpoint accepts Alchemy Address Activity webhook deliveries for Ethereum and Base.
+
+Production deliveries must include:
+
+- A configured webhook ID
+- A matching network
+- `X-Alchemy-Signature`
+- The correct webhook signing secret
+
+Unsigned production webhook requests are rejected.
+
+## Alchemy Wallet Reconciliation
+
+Wallet database changes are persisted before Alchemy watched-address synchronization.
+
+If Alchemy synchronization fails, the wallet change remains saved and the API reports:
+
+```txt
+ALCHEMY_WEBHOOK_SYNC_FAILED
+```
+
+Use reconciliation to repair provider state:
 
 ```bash
 npm run reconcile:alchemy-webhook-addresses -- --dry-run
 npm run reconcile:alchemy-webhook-addresses
 ```
 
-The live command reads every page of each webhook's watched-address list, adds missing
-database addresses, and removes stale addresses only after checking that no active
-wallet still uses that address on the same chain. Logs report planned and completed
-counts per chain. A failed or incomplete address-list response stops changes for that
-chain and exits nonzero. Repeating the command is safe. Legacy watched-address
-overrides apply only to Ethereum dry-runs; live reconciliation always reads Alchemy.
+The reconciliation process:
 
-### Health check
+- Reads current watched addresses
+- Adds missing database addresses
+- Removes stale provider addresses when safe
+- Handles Ethereum and Base independently
+- Stops a chain reconciliation if provider pagination is incomplete or fails
 
-- `GET /api/v1/health` is liveness: the HTTP process responds with `status: ok`.
-- `GET /api/v1/ready` is readiness: it returns `status: ok` only while PostgreSQL responds and the notification outbox worker has started. Otherwise it returns HTTP 503 with `status: not_ready`.
+## Local Development
 
-Configure the deployment host to use `/api/v1/ready` for traffic gating and `/api/v1/health` for process liveness. The server checks PostgreSQL before opening its HTTP listener and exits nonzero if the startup check fails; the host should restart it. The portfolio snapshot job is not a readiness dependency.
-
-### Internal operational diagnostics
-
-Set `OPERATIONS_DIAGNOSTICS_TOKEN` to a random value of at least 32 characters to
-enable `GET /api/v1/operations/status`. Leave it empty to disable the endpoint;
-disabled requests return `404`. The endpoint requires the value in the
-`X-Operations-Token` header. It does not use ordinary wallet-user JWTs, because
-the application has no administrator role and system-wide queue counts must not
-be available to regular users.
+### Install dependencies
 
 ```bash
-curl -H 'X-Operations-Token: replace_with_your_operations_token' \
-  https://backend.example.test/api/v1/operations/status
+npm install
 ```
 
-The response contains aggregate process uptime, PostgreSQL availability,
-notification worker heartbeat timestamps, outbox counts, oldest pending-job age,
-stale processing count, webhook and Alchemy sync success/failure counters, and
-portfolio snapshot run state. It contains no wallet addresses, payloads, provider
-URLs, credentials, or stack traces. Keep this endpoint restricted to an internal
-network or monitoring probe and store the token in the deployment secret store.
-The token header is redacted from HTTP logs.
+### Configure environment
 
-During the internal test release, monitor these signals and structured log events:
+Copy:
 
-- alert immediately when `/api/v1/ready` returns `503` repeatedly or database
-  readiness failures repeat;
-- alert on a process restart loop, using the `process_start` event and process
-  `startedAt`/`uptimeSeconds` diagnostics;
-- alert when `notificationOutbox.failedCount` is above zero;
-- alert when `oldestPendingAgeSeconds` exceeds 600 seconds or
-  `staleProcessingCount` is above zero;
-- alert when the worker has started but `lastCycleCompletedAt` stops advancing for
-  more than two polling intervals;
-- investigate repeated `webhook.failureCount` increases, `Alchemy webhook rejected`
-  bursts, or Alchemy wallet sync/reconciliation failure logs;
-- investigate a portfolio snapshot `lastRunFailedAt` newer than
-  `lastRunSucceededAt`, while keeping snapshots outside readiness.
+```bash
+cp .env.example .env
+```
 
-These checks require only HTTP probing and structured log collection. No external
-monitoring vendor is required.
+Then fill in the required local values.
 
-## Proxy, rate limits, and CORS
+### Run migrations
 
-By default `TRUST_PROXY_HOPS=0` and `TRUST_PROXY_CIDRS` is empty: Express uses
-the socket address as the client IP and ignores client-supplied
-`X-Forwarded-For`. For one reverse proxy, configure both settings with that
-proxy's source address or narrow CIDR, for example:
+```bash
+npm run migrate
+```
+
+### Start the backend
+
+```bash
+npm run dev
+```
+
+The default local API is expected on:
+
+```txt
+http://localhost:3000
+```
+
+## Environment Configuration
+
+Important configuration groups include:
+
+### Database
 
 ```env
-TRUST_PROXY_HOPS=1
-TRUST_PROXY_CIDRS=10.0.0.5/32
+DATABASE_URL=postgresql://...
+DATABASE_POOL_MAX=10
+DATABASE_CONNECTION_TIMEOUT_MS=5000
+DATABASE_IDLE_TIMEOUT_MS=30000
+DATABASE_STATEMENT_TIMEOUT_MS=30000
 ```
 
-The proxy must replace or append `X-Forwarded-For` with the actual client IP,
-and its connection to the backend must come from the configured address.
-Express trusts at most the configured number of hops and only listed proxy
-addresses. Keep the backend reachable only through the proxy; a direct client
-using the proxy's allowed source address cannot be distinguished by IP alone.
-Invalid or incomplete proxy settings fail startup. If the deployment has more
-than one proxy, list only the expected proxy CIDRs and set the actual hop count
-(1 through 5).
+### Holdings
 
-The login, registration, and global API limits use Express's resolved client IP.
-The existing limits and response shape are unchanged. Their in-memory store is
-process-local, so these limits are suitable for **one backend instance only**;
-multiple instances would each have an independent counter. The global API
-limit still excludes health, readiness, and Alchemy webhook requests.
+```env
+PROVIDER_REQUEST_TIMEOUT_MS=5000
+HOLDINGS_CHAIN_TIMEOUT_MS=30000
+ALCHEMY_TOKEN_BALANCE_MAX_PAGES=5
+```
 
-Development CORS allows local browser and React Native tooling. In production,
-`CORS_ALLOWED_ORIGINS` is a comma-separated list of exact HTTPS browser origins
-(scheme, hostname, and optional port, without a trailing slash), for example:
+`PROVIDER_REQUEST_TIMEOUT_MS` limits individual provider calls.
+
+`HOLDINGS_CHAIN_TIMEOUT_MS` limits the complete per-chain holdings computation and defaults to 30 seconds.
+
+### Zerion Positions
+
+```env
+ZERION_MAX_PAGES=10
+```
+
+Positions pagination is bounded to avoid unbounded provider work.
+
+### Alchemy Webhooks
+
+Typical production configuration includes:
+
+```env
+ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_ETHEREUM_MAINNET=...
+ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET=...
+
+ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET=...
+ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET=...
+```
+
+Do not commit webhook signing secrets.
+
+### Push Notifications
+
+```env
+ENABLE_PUSH_NOTIFICATIONS=true
+FIREBASE_DRY_RUN=false
+```
+
+Firebase credentials must be supplied through secure deployment configuration.
+
+## Holdings
+
+Holdings aggregation can include:
+
+- Native balances
+- ERC-20 balances
+- Token metadata
+- Token pricing
+- Suspicious-token classification
+- Low-value token grouping
+
+Provider work is bounded by request deadlines and pagination limits.
+
+When provider limits or timeouts are reached, the response can be marked partial rather than pretending the portfolio is complete.
+
+Last-known-good holdings data may be reused where appropriate.
+
+## Positions
+
+DeFi and protocol positions are fetched from Zerion.
+
+The backend keeps both in-memory and persisted last-known-good positions.
+
+Persisted positions are stored per wallet and chain.
+
+Important behavior:
+
+- Fresh detail requests may call the live provider.
+- Wallet-list mode does not trigger live Zerion fetches.
+- List mode first uses memory cache.
+- If memory is cold, recently persisted positions may be used.
+- Persisted positions older than 24 hours are ignored.
+- Partial or failed provider results do not overwrite the last known good result.
+- Persisted cache entries are matched against the wallet address before reuse.
+
+This keeps wallet-list portfolio totals more stable across backend restarts.
+
+## Database Migrations
+
+Database schema changes are managed through SQL migrations.
+
+Notable recent migrations include:
+
+```txt
+017_wallet_events_history_pagination_index.sql
+018_wallet_chain_positions_cache.sql
+```
+
+Migration `018_wallet_chain_positions_cache.sql` stores recent last-known-good positions for wallet-list consistency after process restarts.
+
+Run all pending migrations with:
+
+```bash
+npm run migrate
+```
+
+Production deployments should run migrations before opening traffic.
+
+## Notification Delivery
+
+Each eligible wallet event can produce a logical notification.
+
+Notification delivery is separated from notification history.
+
+This means:
+
+- Alerts can exist even when the user has no active device token.
+- One logical alert can have multiple device delivery attempts.
+- Read state is not tied to a specific device.
+- Failed FCM sends do not remove alert history.
+
+Transient FCM failures are retried up to the configured retry limit.
+
+Firebase-confirmed invalid tokens are deactivated.
+
+## Notification Read State
+
+Main notification operations include:
+
+```txt
+GET   /api/v1/notifications
+GET   /api/v1/notifications/unread-count
+PATCH /api/v1/notifications/:notificationId/read
+PATCH /api/v1/notifications/read-all
+```
+
+Notification responses include fields such as:
+
+- wallet ID
+- chain ID
+- type
+- category
+- severity
+- title
+- body
+- read state
+
+## Health Checks
+
+### Liveness
+
+```txt
+GET /api/v1/health
+```
+
+Confirms that the HTTP process is running.
+
+### Readiness
+
+```txt
+GET /api/v1/ready
+```
+
+Readiness requires:
+
+- PostgreSQL connectivity
+- Notification outbox worker startup
+
+If a dependency is unavailable, readiness returns HTTP `503`.
+
+Production traffic should be gated on `/api/v1/ready`.
+
+## Operational Diagnostics
+
+An internal diagnostics endpoint can be enabled with:
+
+```env
+OPERATIONS_DIAGNOSTICS_TOKEN=...
+```
+
+Endpoint:
+
+```txt
+GET /api/v1/operations/status
+```
+
+Header:
+
+```txt
+X-Operations-Token: ...
+```
+
+The diagnostics endpoint can expose aggregate runtime information such as:
+
+- Process uptime
+- PostgreSQL availability
+- Notification worker heartbeat
+- Outbox queue counts
+- Failed notification count
+- Oldest pending job age
+- Stale processing count
+- Webhook success / failure counters
+- Alchemy synchronization status
+- Portfolio snapshot job state
+
+It intentionally avoids returning wallet addresses, secrets, provider URLs, or payload data.
+
+Keep this endpoint private.
+
+## Proxy and Rate Limiting
+
+Production reverse-proxy handling is explicit.
+
+Relevant configuration includes:
+
+```env
+TRUST_PROXY_HOPS=...
+TRUST_PROXY_CIDRS=...
+```
+
+Do not blindly trust incoming `X-Forwarded-For` headers.
+
+Rate limiting uses Express's resolved client IP.
+
+Current rate-limit storage is process-local, so multi-instance deployments would require a shared rate-limit store.
+
+## CORS
+
+Native mobile clients do not depend on browser CORS.
+
+For browser clients, production origins can be configured with:
 
 ```env
 CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 ```
 
-An empty production list allows no browser origins, which is appropriate while
-the first-party client is native mobile only. Requests without an `Origin` header,
-including native React Native, server-to-server, and Alchemy webhook requests,
-still pass. Disallowed browser origins receive HTTP 403. Allowed preflight
-requests support the existing HTTP methods and requested headers, including
-`Authorization` and `Content-Type`. Authentication uses bearer tokens rather
-than browser cookies, so CORS credentials are not enabled. CORS is a browser
-access rule; it does not authenticate API or webhook requests.
+An empty production list blocks browser origins while still allowing requests without an `Origin` header, including:
 
-## Provider request budgets
+- React Native
+- Server-to-server requests
+- Alchemy webhooks
 
-`PROVIDER_REQUEST_TIMEOUT_MS` defaults to 5000 ms per Alchemy RPC, Alchemy
-pricing, Zerion positions, and CoinGecko fallback request. HTTP requests use an
-abort signal; ethers RPC transports also have a request deadline. The existing
-Alchemy Notify management calls retain their separate
-`ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS` default of 10000 ms. The Firebase Admin SDK
-uses its own 15000 ms messaging request timeout.
+## Production Database
 
-`ZERION_MAX_PAGES=10` bounds one wallet/chain positions fetch to ten pages of
-100 requested positions (at most 1000 positions and 2000 included records kept).
-`ALCHEMY_TOKEN_BALANCE_MAX_PAGES=5` bounds one wallet/chain balance fetch to
-five pages of 100 requested balances (at most 500 kept). When either limit is
-reached, positions or holdings are marked partial and report a page-limit reason;
-they must not be interpreted as complete portfolio values. Page-limited holdings
-do not replace the last known good or persisted holdings snapshot. Alchemy webhook
-watched-address reconciliation has a fixed 100-page, 10000-address limit and
-fails that chain's reconciliation before applying its changes when the limit is
-exceeded.
+Use PostgreSQL with:
 
-Existing metadata and price caches, in-flight request reuse, 429 cooldowns,
-stale positions/holdings fallbacks, and the eight-second per-chain holdings
-response timeout remain in place. Tune page limits only after measuring normal
-wallet sizes and provider usage; each extra page can trigger metadata and pricing
-requests. Provider errors are logged by provider, operation, safe code/status,
-and timeout classification without API keys or credential-bearing URLs.
+- Automated backups
+- TLS
+- Verified server certificates
+- Secret-managed credentials
+- Restore testing
+- Sufficient connection capacity
 
-## Production database
+In production, database TLS verification is required.
 
-Use a PostgreSQL service with automated backups and a verified TLS endpoint. Store
-`DATABASE_URL` in the deployment secret store; do not put it in logs or source control.
-The backend uses one pool per process. Its default maximum is 10 connections, so
-reserve capacity for migrations, administration, and any additional instances.
-
-Local development uses the `.env.example` URL and disables TLS by default. In
-`NODE_ENV=production`, the backend defaults to TLS with certificate and hostname
-verification. Configure either:
+Example:
 
 ```env
 DATABASE_URL=postgresql://app_user:replace_me@db.example.com:5432/wallet_tracker
@@ -285,334 +521,154 @@ DATABASE_SSL_MODE=verify-full
 DATABASE_SSL_CA_FILE=/mounted-secrets/postgres-ca.pem
 ```
 
-or a URL with `sslmode=verify-full` and, when the provider supplies a private CA,
-`sslrootcert=/mounted-secrets/postgres-ca.pem`. The CA file must exist in the
-container at startup. With no custom CA, the operating system's trusted CAs are
-used. Use the provider's DNS hostname that appears in its certificate. Do not
-combine URL TLS parameters with `DATABASE_SSL_MODE` or `DATABASE_SSL_CA_FILE`.
-Production rejects disabled or unverified TLS settings. No cloud vendor is assumed.
+Do not put database credentials in Git or logs.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `DATABASE_POOL_MAX` | `10` | Maximum connections per process |
-| `DATABASE_CONNECTION_TIMEOUT_MS` | `5000` | Maximum wait to establish or obtain a connection |
-| `DATABASE_IDLE_TIMEOUT_MS` | `30000` | Close idle pooled connections |
-| `DATABASE_STATEMENT_TIMEOUT_MS` | `30000` | PostgreSQL server limit for ordinary statements |
-| `DATABASE_MIGRATION_LOCK_WAIT_TIMEOUT_MS` | `10000` | Maximum advisory lock wait |
-| `DATABASE_MIGRATION_LOCK_TIMEOUT_MS` | `5000` | Maximum wait for table/row locks during migration SQL |
-| `DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS` | `300000` | PostgreSQL server limit for each migration statement |
+## Backup and Restore
 
-All timeout values are positive milliseconds. Migrations run in transactions and
-retain their advisory lock. A lock or statement timeout exits the migration command
-with failure; resolve the cause before retrying. Run migrations once as a deployment
-step before allowing traffic. Readiness still uses a three second `SELECT 1` probe
-and returns HTTP 503 when PostgreSQL is unavailable. Shutdown closes the pool.
+Production database recovery should include:
 
-### Backup and restore readiness
+- Automated daily backups
+- Point-in-time recovery or WAL archiving
+- Encrypted backups
+- Restricted restore access
+- Regular restore testing
+- Independent backup retention
 
-Minimum production requirements: enable automated daily backups and continuous WAL
-archiving or provider point-in-time recovery; retain recoverable history for at least
-14 days; encrypt backups at rest and in transit; restrict backup and restore access;
-monitor backup failures and storage capacity; and keep a backup copy independent of
-the application instance. Set an operational target of at most one hour of data loss
-and four hours to restore service. Confirm the database provider's actual recovery
-granularity and retention meet those targets before launch.
+Restores should be tested in an isolated database before production launch.
 
-At least quarterly, and after a database or backup configuration change, test a
-restore into an isolated PostgreSQL instance at a chosen recovery timestamp:
+## Testing
 
-1. Record backup timestamp, recovery target, source version, and restore start time.
-2. Restore using the provider's documented procedure. Keep the restored instance
-   isolated from production webhooks, workers, and notification delivery.
-3. Run `npm run migrate` against the restored database with the matching application
-   release, then check that the command exits successfully.
-4. Verify expected tables and migration records, recent `wallet_events`,
-   `notifications`, `notification_outbox`, and `chain_sync_state` rows; compare row
-   counts and latest timestamps with the source at the recovery point.
-5. Start the API with external delivery disabled, check `/api/v1/ready`, and perform
-   a read-only authenticated query. Record elapsed restore time and data gap; confirm
-   both meet the recovery targets. Delete the isolated copy securely afterward.
-
-For a portable manual snapshot, `pg_dump --format=custom --file=backup.dump` and
-`pg_restore --no-owner --dbname=wallet_tracker_restore backup.dump` use the standard
-`PGHOST`, `PGUSER`, `PGDATABASE`, and password-file connection settings. Run restore
-only against a fresh isolated database. A manual dump is supplemental and does not
-replace automated backups or point-in-time recovery.
-
-## Local setup
-
-1. Copy `.env.example` to `.env`
-2. Install dependencies:
+Run the backend test suite with:
 
 ```bash
-npm install
+npm test
 ```
 
-3. Run migrations:
+The current suite covers areas including:
+
+- Authentication
+- Wallet ownership
+- Webhook validation
+- Notification behavior
+- Provider timeouts
+- Holdings behavior
+- Positions persistence
+- Read / unread notification state
+- API error handling
+
+## Continuous Integration
+
+GitHub Actions runs backend checks on pushes and pull requests.
+
+Typical CI steps include:
 
 ```bash
+npm ci
 npm run migrate
+npm test
 ```
 
-4. Start the API:
+The workflow uses a temporary PostgreSQL database.
 
-```bash
-npm run dev
+Current backend CI is expected to pass without real provider API keys.
+
+## Security Notes
+
+The backend includes release-hardening for:
+
+- Sensitive header redaction
+- Webhook signature validation
+- Production CORS
+- Proxy-aware client IP handling
+- Rate limiting
+- Provider request deadlines
+- Database TLS verification
+- Migration locking and timeouts
+- Logical notification ownership
+- Device-token cleanup
+- Operational endpoint protection
+
+Secrets must stay outside Git.
+
+Do not log:
+
+- API keys
+- Signing secrets
+- JWT secrets
+- Firebase credentials
+- Database credentials
+- Device tokens
+- Authentication headers
+
+## Current Release Status
+
+Backend release hardening is largely complete.
+
+Completed areas include:
+
+- Secure Alchemy webhook signing for Ethereum and Base
+- Wallet subscription reconciliation
+- Notification outbox durability
+- Logical notification history
+- Read / unread notification semantics
+- FCM retry and invalid-token cleanup
+- Readiness and liveness checks
+- PostgreSQL TLS and migration hardening
+- Proxy-aware rate limiting
+- Production CORS
+- Provider request timeouts
+- Pagination limits
+- Wallet event history pagination
+- Operational diagnostics
+- Persisted last-known-good wallet positions
+
+Current release work is focused on:
+
+- Production backend deployment
+- Remote PostgreSQL deployment
+- Production environment variables
+- Running migrations in production
+- Production Alchemy webhook URLs
+- Monitoring and operational validation
+- Mobile release integration
+
+## Deployment
+
+The intended production shape is:
+
+```txt
+Mobile App
+    ↓
+HTTPS
+    ↓
+Node.js / Express Backend
+    ↓
+PostgreSQL
+
+Alchemy ──webhooks──> Backend
+Backend ──FCM──────> Firebase / APNs / Android
 ```
 
-## Continuous integration
+A managed deployment platform such as Railway or a similar service can host the backend and PostgreSQL.
 
-The repository includes a minimal GitHub Actions workflow at
-[`/.github/workflows/backend-ci.yml`](/Users/ulas/Documents/New%20project/.github/workflows/backend-ci.yml).
+Before production traffic:
 
-It runs on `push` and `pull_request` and will:
+1. Deploy PostgreSQL.
+2. Configure database TLS.
+3. Configure backend secrets.
+4. Run migrations.
+5. Deploy the backend.
+6. Verify `/api/v1/health`.
+7. Verify `/api/v1/ready`.
+8. Configure production Alchemy webhook URLs.
+9. Run Alchemy address reconciliation.
+10. Test a real wallet event.
+11. Confirm notification history.
+12. Confirm device delivery.
+13. Monitor operational diagnostics.
 
-- install dependencies with `npm ci`
-- start a temporary PostgreSQL service
-- run `npm run migrate`
-- run optional `lint`, `typecheck`, or `check` scripts if they exist
-- run `npm test`
+## License
 
-### CI environment used for tests
+This project is currently private / experimental.
 
-The current backend tests require a PostgreSQL database plus a JWT secret. The workflow provides:
-
-```env
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/wallet_tracker_test
-JWT_SECRET=dev_jwt_secret_that_is_long_enough_for_local_checks
-NODE_ENV=test
-ENABLE_PUSH_NOTIFICATIONS=false
-ENABLE_ETHEREUM_TRACKER=false
-ENABLE_PORTFOLIO_SNAPSHOT_JOB=false
-```
-
-No real provider API keys are required for the current test suite.
-
-### Webhook-first config guidance
-
-For normal real-time notification mode, keep the polling tracker disabled:
-
-```env
-ENABLE_ETHEREUM_TRACKER=false
-```
-
-Only enable the polling tracker for local polling tests or fallback/debug sessions:
-
-```env
-ENABLE_ETHEREUM_TRACKER=true
-```
-
-### Test push notifications locally
-
-1. Install the new Firebase dependency:
-
-```bash
-npm install
-```
-
-2. Configure push settings in `.env`:
-
-```env
-ENABLE_PUSH_NOTIFICATIONS=true
-FIREBASE_DRY_RUN=true
-FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"..."}
-```
-
-`FIREBASE_DRY_RUN=true` lets you verify the backend notification pipeline without actually delivering to a device.
-
-3. Register a device token for the user whose wallets are being tracked:
-
-```bash
-curl -X POST http://localhost:3000/api/v1/users/YOUR_USER_ID/device-tokens \
-  -H "Content-Type: application/json" \
-  -d '{
-    "token": "YOUR_FCM_DEVICE_TOKEN",
-    "platform": "ios"
-  }'
-```
-
-4. Trigger a new wallet event using the Alchemy webhook endpoint or a real webhook delivery.
-
-5. Check Postgres:
-
-```sql
-SELECT
-  nd.wallet_event_id,
-  nd.device_token_id,
-  nd.status,
-  nd.retryable,
-  nd.provider_message_id,
-  nd.error_message,
-  nd.sent_at
-FROM notification_deliveries nd
-ORDER BY nd.created_at DESC
-LIMIT 20;
-```
-
-With dry-run enabled, you should still see delivery rows being written, which confirms the notification pipeline is executing.
-
-6. To test real push delivery on a phone:
-- set `FIREBASE_DRY_RUN=false`
-- use a real FCM token from your React Native app
-- trigger another wallet event
-- confirm the push appears on the device
-
-### Test the Alchemy webhook locally
-
-For this unsigned local example only, set `ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV=true` with
-`NODE_ENV=development`. Production requires separate Ethereum and Base webhook IDs and
-signing secrets and will reject the unsigned setting. Real Alchemy deliveries must use
-the configured webhook ID and that webhook's `X-Alchemy-Signature`.
-
-1. Start the API:
-
-```bash
-npm run dev
-```
-
-2. Make sure you have at least one tracked wallet in the database for the address you want Alchemy to report.
-
-3. Send a test payload to the local webhook endpoint:
-
-```bash
-curl -X POST http://localhost:3000/api/v1/webhooks/alchemy \
-  -H "Content-Type: application/json" \
-  -d '{
-    "webhookId": "wh_test_123",
-    "id": "evt_test_123",
-    "createdAt": "2026-03-23T12:00:00.000Z",
-    "type": "ADDRESS_ACTIVITY",
-    "event": {
-      "network": "ETH_MAINNET",
-      "activity": [
-        {
-          "blockNum": "0x1792f90",
-          "hash": "0xeaffdf76f405b79e366e9ac15630ab80456563eb0fe332a1546f56e84c9ec735",
-          "fromAddress": "0x1bcae4fbdccb2ad253521a3ff00313317775d1eb",
-          "toAddress": "0xb4c00dcc9080f0ceaff5660498995120baf5958c",
-          "category": "token",
-          "asset": "WETH",
-          "rawContract": {
-            "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-            "decimals": 18,
-            "rawValue": "100000000000000"
-          },
-          "log": {
-            "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-            "logIndex": "0x228",
-            "topics": [
-              "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-            ],
-            "data": "0x00000000000000000000000000000000000000000000000000005af3107a4000"
-          }
-        }
-      ]
-    }
-  }'
-```
-
-4. You should get a `202` response showing how many activities were received, normalized, and inserted.
-
-5. Verify the stored event:
-
-```bash
-curl http://localhost:3000/api/v1/wallets/YOUR_WALLET_ID/events
-```
-
-You can also inspect Postgres directly:
-
-```sql
-SELECT
-  wallet_id,
-  transaction_hash,
-  event_type,
-  asset_symbol,
-  amount,
-  from_address,
-  to_address,
-  occurred_at
-FROM wallet_events
-ORDER BY occurred_at DESC
-LIMIT 20;
-```
-
-### Run the Ethereum tracker
-
-Set these values in `.env` first:
-
-```env
-ENABLE_ETHEREUM_TRACKER=true
-ETHEREUM_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/your-key
-ETHEREUM_CONFIRMATIONS=6
-ETHEREUM_BATCH_SIZE=250
-ETHEREUM_POLL_INTERVAL_MS=15000
-ETHEREUM_START_BLOCK=0
-ETHEREUM_RPC_REQUEST_DELAY_MS=1000
-ETHEREUM_RPC_MAX_RETRIES=5
-ETHEREUM_RPC_BACKOFF_BASE_MS=1000
-```
-
-Then either:
-
-- run it inside the API process with `ENABLE_ETHEREUM_TRACKER=true npm run dev`
-- or run it separately with:
-
-```bash
-npm run tracker:ethereum
-```
-
-## Notes
-
-- `userId` is currently passed as a route parameter to keep the first iteration simple. In production, this should come from authenticated user context.
-- Address validation currently targets EVM-compatible addresses. If you want to support Solana, Bitcoin, or other chains, add chain-specific validators in `wallets.schemas.js`.
-- The webhook path is now the intended production ingestion path. The polling tracker remains available for fallback/debug workflows.
-- Firebase push delivery is triggered after a new `wallet_events` row is successfully inserted.
-- The current tracker detects native ETH transfers plus ERC-20 and ERC-721 / ERC-1155 NFT transfers on Ethereum mainnet.
-- NFT buy/sell classification is not implemented yet because it requires marketplace-specific trade decoding beyond generic transfer logs.
-- The tracker now rate-limits RPC usage for Alchemy-style providers by spacing calls, retrying `429` responses with exponential backoff, and keeping the sync cursor unchanged when a batch fails.
-
-## Testing Native ETH Transfers Locally
-
-1. Add a tracked wallet with `"trackTypes": ["native_transfer"]` or include `native_transfer` alongside the other types.
-2. Set `ENABLE_ETHEREUM_TRACKER=true` and a valid `ETHEREUM_RPC_URL` in `.env`.
-3. For a fast test, set:
-
-```env
-ETHEREUM_CONFIRMATIONS=0
-ETHEREUM_BATCH_SIZE=25
-ETHEREUM_POLL_INTERVAL_MS=5000
-ETHEREUM_RPC_REQUEST_DELAY_MS=1000
-ETHEREUM_RPC_MAX_RETRIES=5
-ETHEREUM_RPC_BACKOFF_BASE_MS=1000
-```
-
-4. Start the tracker with `npm run tracker:ethereum` or run the API with tracking enabled.
-5. Send a small ETH transfer either:
-   - from your tracked wallet to another address
-   - or from another wallet to your tracked wallet
-6. Query PostgreSQL after the transaction is mined:
-
-```sql
-SELECT
-  wallet_id,
-  event_type,
-  transaction_hash,
-  block_number,
-  from_address,
-  to_address,
-  amount_wei,
-  amount,
-  direction,
-  occurred_at
-FROM wallet_events
-WHERE event_type = 'native_transfer'
-ORDER BY created_at DESC
-LIMIT 10;
-```
-
-You should see:
-- `event_type = 'native_transfer'`
-- `amount_wei` as the raw wei value
-- `amount` as the ETH amount string
-- `direction = 'incoming'` when the tracked wallet is the recipient
-- `direction = 'outgoing'` when the tracked wallet is the sender
+A production or open-source license can be added before public distribution.

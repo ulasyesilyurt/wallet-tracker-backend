@@ -6,9 +6,14 @@ import {
   fetchWalletPositionsForChain,
   peekCachedWalletPositionsForChain
 } from './positions.provider.js';
+import {
+  findWalletChainPositionsCaches,
+  upsertWalletChainPositionsCache
+} from './positions.repository.js';
 
 const POSITIONS_CACHE_TTL_MS = 60 * 1000;
 const DEGRADED_POSITIONS_CACHE_TTL_MS = 30 * 1000;
+const PERSISTED_POSITIONS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const CHAIN_FETCH_DELAY_MS = 150;
 const positionsCache = new Map();
 const inFlightPositionsPromises = new Map();
@@ -53,7 +58,7 @@ function buildPositionsCacheKey(wallet) {
   return `${wallet.id}:${enabledChains.join('|')}`;
 }
 
-function getCachedPositions(cacheKey) {
+function getCachedPositions(cacheKey, { allowListOnly = true } = {}) {
   const entry = positionsCache.get(cacheKey);
 
   if (!entry) {
@@ -65,14 +70,22 @@ function getCachedPositions(cacheKey) {
     return null;
   }
 
+  if (entry.listOnly && !allowListOnly) {
+    return null;
+  }
+
   return entry.value;
 }
 
-function setCachedPositions(cacheKey, value) {
+function setCachedPositions(cacheKey, value, { listOnly = false, expiresAt = Infinity } = {}) {
   const isDegraded = value?.isPartial === true;
   positionsCache.set(cacheKey, {
     value,
-    expiresAt: Date.now() + (isDegraded ? DEGRADED_POSITIONS_CACHE_TTL_MS : POSITIONS_CACHE_TTL_MS)
+    listOnly,
+    expiresAt: Math.min(
+      Date.now() + (isDegraded ? DEGRADED_POSITIONS_CACHE_TTL_MS : POSITIONS_CACHE_TTL_MS),
+      expiresAt
+    )
   });
 }
 
@@ -131,7 +144,7 @@ function aggregatePositionsResponse({ wallet, enabledChains, chainResponses, par
 export async function getWalletPositions(walletId, { userId = null } = {}) {
   const { wallet, enabledChains, supportedChains } = await findSupportedWallet(walletId, userId);
   const cacheKey = buildPositionsCacheKey(wallet);
-  const cachedPositions = getCachedPositions(cacheKey);
+  const cachedPositions = getCachedPositions(cacheKey, { allowListOnly: false });
 
   if (cachedPositions) {
     return cachedPositions;
@@ -174,6 +187,23 @@ export async function getWalletPositions(walletId, { userId = null } = {}) {
         try {
           const chainResponse = await fetchWalletPositionsForChain(wallet, chainId);
           successfulResponses.push(chainResponse);
+
+          if (chainResponse.isPartial === false && Array.isArray(chainResponse.positions)) {
+            try {
+              await upsertWalletChainPositionsCache({
+                walletId: wallet.id,
+                walletAddress: wallet.address,
+                chainId,
+                positions: chainResponse.positions,
+                capturedAt: new Date()
+              });
+            } catch (error) {
+              positionsServiceLogger.warn(
+                { walletId: wallet.id, chainId, errorName: error?.name ?? 'Error' },
+                'Could not persist last-known-good positions'
+              );
+            }
+          }
 
           positionsServiceLogger.info(
             {
@@ -264,8 +294,8 @@ export async function getWalletPositions(walletId, { userId = null } = {}) {
   return positionsPromise;
 }
 
-export async function getCachedWalletPositions(walletId) {
-  const { wallet, enabledChains, supportedChains } = await findSupportedWallet(walletId);
+export async function getCachedWalletPositions(walletId, { userId = null } = {}) {
+  const { wallet, enabledChains, supportedChains } = await findSupportedWallet(walletId, userId);
   const cacheKey = buildPositionsCacheKey(wallet);
   const cachedPositions = getCachedPositions(cacheKey);
 
@@ -275,15 +305,57 @@ export async function getCachedWalletPositions(walletId) {
 
   const partialReasons = [];
   const cachedChainResponses = [];
+  const missingChainIds = [];
 
   for (const chainId of supportedChains) {
     const cachedChainResponse = peekCachedWalletPositionsForChain(wallet, chainId);
 
     if (cachedChainResponse) {
       cachedChainResponses.push(cachedChainResponse);
+      if (cachedChainResponse.isPartial === true) {
+        partialReasons.push(...(cachedChainResponse.partialReasons ?? []));
+      }
+    } else {
+      missingChainIds.push(chainId);
+    }
+  }
+
+  let persistedByChain = new Map();
+  let persistedExpiresAt = Infinity;
+  if (missingChainIds.length > 0) {
+    try {
+      const persisted = await findWalletChainPositionsCaches({
+        walletId: wallet.id,
+        walletAddress: wallet.address,
+        chainIds: missingChainIds,
+        maxAgeMs: PERSISTED_POSITIONS_MAX_AGE_MS
+      });
+      persistedByChain = new Map(persisted.map((entry) => [entry.chainId, entry]));
+    } catch (error) {
+      positionsServiceLogger.warn(
+        { walletId: wallet.id, errorName: error?.name ?? 'Error' },
+        'Could not load last-known-good positions'
+      );
+    }
+  }
+
+  for (const chainId of missingChainIds) {
+    const persisted = persistedByChain.get(chainId);
+    const freshUntil = persisted
+      ? new Date(persisted.capturedAt).getTime() + PERSISTED_POSITIONS_MAX_AGE_MS
+      : 0;
+    if (persisted && Array.isArray(persisted.positions) && freshUntil > Date.now()) {
+      cachedChainResponses.push({ positions: persisted.positions });
+      partialReasons.push(buildPartialReason('PERSISTED_POSITIONS_CACHE', chainId));
+      persistedExpiresAt = Math.min(persistedExpiresAt, freshUntil);
     } else {
       partialReasons.push(buildPartialReason('CACHE_MISS', chainId));
     }
+  }
+
+  const newlyCachedPositions = getCachedPositions(cacheKey);
+  if (newlyCachedPositions) {
+    return newlyCachedPositions;
   }
 
   if (cachedChainResponses.length === 0) {
@@ -297,6 +369,6 @@ export async function getCachedWalletPositions(walletId) {
     partialReasons
   });
 
-  setCachedPositions(cacheKey, aggregatedResponse);
+  setCachedPositions(cacheKey, aggregatedResponse, { listOnly: true, expiresAt: persistedExpiresAt });
   return aggregatedResponse;
 }

@@ -139,7 +139,7 @@ export async function getWalletPortfolioSummary(
     });
     const positionsPromise = includePositions
       ? getWalletPositions(walletId, { userId })
-      : getCachedWalletPositions(walletId);
+      : getCachedWalletPositions(walletId, { userId });
     const [holdingsResult, positionsResult] = await Promise.allSettled([holdingsPromise, positionsPromise]);
 
     if (holdingsResult.status !== 'fulfilled') {

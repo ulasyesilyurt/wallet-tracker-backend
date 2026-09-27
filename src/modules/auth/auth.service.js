@@ -3,6 +3,15 @@ import { hashPassword, verifyPassword } from '../../utils/password.js';
 import { HttpError } from '../../utils/httpError.js';
 import { createUser, findUserByEmail } from './auth.repository.js';
 
+const EMAIL_UNIQUE_CONSTRAINTS = new Set([
+  'app_users_email_key',
+  'idx_app_users_email_normalized_unique'
+]);
+
+function emailInUseError() {
+  return new HttpError(409, 'AUTH_EMAIL_IN_USE', 'An account with that email already exists.');
+}
+
 function sanitizeUser(user) {
   return {
     id: user.id,
@@ -24,15 +33,23 @@ export async function registerUser({ email, password, name }) {
   const existingUser = await findUserByEmail(email);
 
   if (existingUser) {
-    throw new HttpError(409, 'AUTH_EMAIL_IN_USE', 'An account with that email already exists.');
+    throw emailInUseError();
   }
 
   const passwordHash = await hashPassword(password);
-  const user = await createUser({
-    email,
-    passwordHash,
-    name
-  });
+  let user;
+  try {
+    user = await createUser({
+      email,
+      passwordHash,
+      name
+    });
+  } catch (error) {
+    if (error?.code === '23505' && EMAIL_UNIQUE_CONSTRAINTS.has(error.constraint)) {
+      throw emailInUseError();
+    }
+    throw error;
+  }
 
   return buildAuthResponse(user);
 }

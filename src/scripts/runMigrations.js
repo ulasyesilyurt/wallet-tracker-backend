@@ -125,7 +125,14 @@ async function run() {
         logger.info({ file }, 'Applied migration successfully');
       } catch (error) {
         await client.query('ROLLBACK');
-        logger.error({ errorName: error.name, errorCode: error.code ?? null, file }, 'Migration failed');
+        logger.error({
+          errorName: error.name,
+          errorCode: error.code ?? null,
+          file,
+          ...(file === '019_normalized_user_email_unique.sql' && error.code === 'CE001'
+            ? { safeDiagnostic: error.message }
+            : {})
+        }, 'Migration failed');
         throw error;
       }
     }

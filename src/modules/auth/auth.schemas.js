@@ -21,3 +21,11 @@ export const loginSchema = z.object({
     password: z.string().min(1)
   })
 });
+
+const codeSchema = z.string().regex(/^\d{6}$/, 'Code must contain exactly 6 digits.');
+
+export const verifyEmailSchema = z.object({ body: z.object({ code: codeSchema }) });
+export const forgotPasswordSchema = z.object({ body: z.object({ email: emailSchema }) });
+export const resetPasswordSchema = z.object({
+  body: z.object({ email: emailSchema, code: codeSchema, newPassword: passwordSchema })
+});

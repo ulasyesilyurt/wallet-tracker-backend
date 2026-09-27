@@ -28,6 +28,9 @@ const envSchema = z.object({
   DATABASE_MIGRATION_LOCK_TIMEOUT_MS: z.coerce.number().int().min(1).default(5_000),
   DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(1).default(300_000),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
+  AUTH_EMAIL_DELIVERY_MODE: z.enum(['disabled', 'resend']).default('disabled'),
+  RESEND_API_KEY: z.string().default(''),
+  AUTH_EMAIL_FROM: z.string().default(''),
   OPERATIONS_DIAGNOSTICS_TOKEN: z.string().refine(
     (value) => value === '' || value.trim().length >= 32,
     'OPERATIONS_DIAGNOSTICS_TOKEN must be empty or at least 32 characters long'
@@ -157,8 +160,26 @@ const envSchema = z.object({
     });
   }
 
+  if (config.AUTH_EMAIL_DELIVERY_MODE === 'resend') {
+    if (!config.RESEND_API_KEY.trim()) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['RESEND_API_KEY'], message: 'RESEND_API_KEY is required for Resend delivery' });
+    }
+    if (!/^(?:[^<>\r\n]+ <[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+>|[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+)$/.test(config.AUTH_EMAIL_FROM.trim())) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['AUTH_EMAIL_FROM'], message: 'AUTH_EMAIL_FROM must be a valid sender address' });
+    }
+  }
+
   if (config.NODE_ENV !== 'production') {
     return;
+  }
+
+  for (const key of ['RESEND_API_KEY', 'AUTH_EMAIL_FROM']) {
+    if (!config[key]?.trim()) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `${key} is required in production` });
+    }
+  }
+  if (config.AUTH_EMAIL_DELIVERY_MODE !== 'resend') {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['AUTH_EMAIL_DELIVERY_MODE'], message: 'Resend email delivery is required in production' });
   }
 
   for (const key of [

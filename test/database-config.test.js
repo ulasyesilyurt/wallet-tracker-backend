@@ -20,6 +20,9 @@ function config(overrides = {}) {
     ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET: 'test-base-id',
     ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET: 'test-eth-secret',
     ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET: 'test-base-secret',
+    AUTH_EMAIL_DELIVERY_MODE: 'resend',
+    RESEND_API_KEY: 're_test_database_only',
+    AUTH_EMAIL_FROM: 'ChainBell <no-reply@example.test>',
     ...overrides
   });
 }

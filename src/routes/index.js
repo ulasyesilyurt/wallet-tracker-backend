@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authRouter } from '../modules/auth/auth.routes.js';
+import { createAuthRouter } from '../modules/auth/auth.routes.js';
 import { deviceTokensRouter } from '../modules/deviceTokens/deviceTokens.routes.js';
 import { eventsRouter } from '../modules/events/events.routes.js';
 import { holdingsRouter } from '../modules/holdings/holdings.routes.js';
@@ -17,7 +17,8 @@ export function createApiRouter({
   isWorkerReady = () => true,
   isShuttingDown = () => false,
   operationsToken = '',
-  getOperationalStatus = async () => ({ status: 'unavailable' })
+  getOperationalStatus = async () => ({ status: 'unavailable' }),
+  authEmailService
 } = {}) {
   const router = Router();
 
@@ -45,7 +46,7 @@ export function createApiRouter({
 
   router.use(createOperationsRouter({ token: operationsToken, getStatus: getOperationalStatus }));
 
-  router.use(authRouter);
+  router.use(createAuthRouter(authEmailService));
   router.use(walletsRouter);
   router.use(deviceTokensRouter);
   router.use(eventsRouter);

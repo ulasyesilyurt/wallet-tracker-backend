@@ -6,6 +6,7 @@ function mapUser(row) {
     email: row.email,
     name: row.name,
     passwordHash: row.password_hash,
+    emailVerifiedAt: row.email_verified_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -16,7 +17,7 @@ export async function createUser({ email, passwordHash, name }) {
     `
       INSERT INTO app_users (email, password_hash, name)
       VALUES (LOWER($1), $2, $3)
-      RETURNING id, email, name, password_hash, created_at, updated_at
+      RETURNING id, email, name, password_hash, email_verified_at, created_at, updated_at
     `,
     [email, passwordHash, name ?? null]
   );
@@ -27,7 +28,7 @@ export async function createUser({ email, passwordHash, name }) {
 export async function findUserByEmail(email) {
   const result = await query(
     `
-      SELECT id, email, name, password_hash, created_at, updated_at
+      SELECT id, email, name, password_hash, email_verified_at, created_at, updated_at
       FROM app_users
       WHERE LOWER(email) = LOWER($1)
       LIMIT 1
@@ -41,7 +42,7 @@ export async function findUserByEmail(email) {
 export async function findUserById(userId) {
   const result = await query(
     `
-      SELECT id, email, name, password_hash, created_at, updated_at
+      SELECT id, email, name, password_hash, email_verified_at, created_at, updated_at
       FROM app_users
       WHERE id = $1
       LIMIT 1

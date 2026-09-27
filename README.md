@@ -120,6 +120,23 @@ The Ethereum polling tracker remains available only for fallback, debugging, or 
 
 Authentication is handled through JWT-based application sessions.
 
+### Email verification and password recovery
+
+Phase 2 adds 6-digit, 10-minute email challenges. Apply migration `020_auth_challenges.sql` before deploying this version. Registration and login keep issuing the existing access token. Existing accounts with an email are marked verified by the migration; accounts registered afterward start with `user.emailVerified: false`. Registration does not send a code automatically: the client calls the verification request endpoint when its code-entry screen is ready. Verification is currently informational and does not gate login or wallet APIs, so existing mobile clients keep working. The mobile app should add request/code entry screens and use `emailVerified` from register, login, and `/auth/me` before a later enforcement phase.
+
+All endpoints are under `/api/v1`. JSON responses use the existing `data` or `error` envelope:
+
+| Endpoint | Body and auth | Success |
+| --- | --- | --- |
+| `POST /auth/email-verification/request` | Bearer access token; empty body | `202 {"data":{"message":"If verification is needed, a code has been sent."}}` |
+| `POST /auth/email-verification/verify` | Bearer access token; `{"code":"123456"}` | `200 {"data":{"user":{... ,"emailVerified":true}}}` |
+| `POST /auth/forgot-password` | `{"email":"name@example.com"}` | `202 {"data":{"message":"If an account exists for that email, a reset code has been sent."}}` for known and unknown accounts |
+| `POST /auth/reset-password` | `{"email":"name@example.com","code":"123456","newPassword":"at-least-8-chars"}` | `200 {"data":{"message":"Password updated."}}` |
+
+Invalid, expired, exhausted, or reused codes return `400 AUTH_INVALID_CODE`. Verification requests require the account's bearer token; a rapid resend returns `429 AUTH_CODE_REQUEST_LIMITED`. Code requests and submissions also use the existing per-IP auth rate-limit window. Each account may issue at most five challenges per purpose per hour, with a one-minute spacing while an active code exists; each code allows five wrong guesses. Issuing a new code consumes the older active code. Codes are generated with cryptographic randomness and stored as keyed digests, never plaintext. Successful reset changes the scrypt password hash. Already-issued JWTs retain their current lifetime; token revocation is a separate auth phase.
+
+Forgot-password returns the same response even if delivery fails. Delivery failures are logged with safe error codes and the undelivered challenge is consumed; monitor those logs. A 300 ms response floor reduces obvious timing differences, though email network latency can still vary. Verification requests return `503 AUTH_EMAIL_UNAVAILABLE` if delivery fails. Neither response includes the code or provider details.
+
 ### Wallet Management
 
 Typical wallet operations include:
@@ -264,6 +281,16 @@ DATABASE_CONNECTION_TIMEOUT_MS=5000
 DATABASE_IDLE_TIMEOUT_MS=30000
 DATABASE_STATEMENT_TIMEOUT_MS=30000
 ```
+
+### Transactional email
+
+```env
+AUTH_EMAIL_DELIVERY_MODE=resend
+RESEND_API_KEY=<server-side secret>
+AUTH_EMAIL_FROM=ChainBell <no-reply@your-verified-domain.example>
+```
+
+Production startup requires Resend mode, an API key, and a sender address. Verify the sender domain with Resend, grant the API key email-send permission, and store the key in deployment secrets. The [Resend email API](https://resend.com/docs/api-reference/emails/send-email) is called through a small service adapter with a 10-second deadline. Development defaults to `AUTH_EMAIL_DELIVERY_MODE=disabled`; requests cannot deliver codes until configured. Automated tests never contact Resend and inject a stub delivery service. Do not log or commit API keys, challenge codes, or email payloads.
 
 ### Holdings
 

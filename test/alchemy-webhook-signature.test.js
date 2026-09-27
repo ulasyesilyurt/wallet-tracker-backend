@@ -21,6 +21,9 @@ process.env.ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET = baseWebhookId;
 process.env.ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET = ethereumSecret;
 process.env.ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET = baseSecret;
 process.env.ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV = 'false';
+process.env.AUTH_EMAIL_DELIVERY_MODE = 'resend';
+process.env.RESEND_API_KEY = 're_test_webhook_only';
+process.env.AUTH_EMAIL_FROM = 'ChainBell <no-reply@example.test>';
 
 const { default: request } = await import('supertest');
 const { createApp } = await import('../src/app.js');

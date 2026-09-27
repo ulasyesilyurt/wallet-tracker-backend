@@ -28,6 +28,9 @@ function createProductionEnvironment(overrides = {}) {
     ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET: 'test-readiness-ethereum-secret',
     ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET: 'test-readiness-base-secret',
     ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV: 'false',
+    AUTH_EMAIL_DELIVERY_MODE: 'resend',
+    RESEND_API_KEY: 're_test_readiness_only',
+    AUTH_EMAIL_FROM: 'ChainBell <no-reply@example.test>',
     ...overrides
   };
 }

@@ -51,7 +51,10 @@ for (const nodeEnv of ['development', 'production']) {
         ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET: 'wh_logging_base',
         ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET: 'test-logging-ethereum-secret',
         ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET: 'test-logging-base-secret',
-        ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV: 'false'
+        ALCHEMY_WEBHOOK_ALLOW_UNSIGNED_DEV: 'false',
+        AUTH_EMAIL_DELIVERY_MODE: 'resend',
+        RESEND_API_KEY: 're_test_logging_only',
+        AUTH_EMAIL_FROM: 'ChainBell <no-reply@example.test>'
       }
     });
 

@@ -18,6 +18,9 @@ process.env.ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_ETHEREUM_MAINNET = 'wh_network_e
 process.env.ALCHEMY_ADDRESS_ACTIVITY_WEBHOOK_ID_BASE_MAINNET = 'wh_network_base';
 process.env.ALCHEMY_WEBHOOK_SIGNING_SECRET_ETHEREUM_MAINNET = 'network-eth-secret';
 process.env.ALCHEMY_WEBHOOK_SIGNING_SECRET_BASE_MAINNET = 'network-base-secret';
+process.env.AUTH_EMAIL_DELIVERY_MODE = 'resend';
+process.env.RESEND_API_KEY = 're_test_network_only';
+process.env.AUTH_EMAIL_FROM = 'ChainBell <no-reply@example.test>';
 
 const { parseEnvironment } = await import('../src/config/env.js');
 const { createTrustProxy } = await import('../src/config/network.js');

@@ -84,7 +84,7 @@ test('concurrent registration and direct inserts respect normalized database uni
 
 test('legacy mixed-case account can log in with differently cased email', async () => {
   const email = testEmail();
-  await query('INSERT INTO app_users (email, password_hash) VALUES ($1, $2)', [email, await hashPassword(password)]);
+  await query('INSERT INTO app_users (email, password_hash, email_verified_at) VALUES ($1, $2, NOW())', [email, await hashPassword(password)]);
 
   const loggedIn = await request(app).post('/api/v1/auth/login')
     .send({ email: email.toLowerCase(), password });

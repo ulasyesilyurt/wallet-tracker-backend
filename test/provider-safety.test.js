@@ -254,7 +254,7 @@ test('positions API returns a partial response when Zerion times out', async () 
   const address = wallet().address;
   const aborts = [];
   global.fetch = abortAwareFetch(aborts);
-  await query('INSERT INTO app_users (id, email) VALUES ($1, $2)', [userId, `provider-${userId}@example.test`]);
+  await query('INSERT INTO app_users (id, email, email_verified_at) VALUES ($1, $2, NOW())', [userId, `provider-${userId}@example.test`]);
   try {
     await query(
       'INSERT INTO tracked_wallets (id, user_id, chain_id, address, status) VALUES ($1, $2, $3, $4, $5)',

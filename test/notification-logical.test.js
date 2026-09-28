@@ -110,8 +110,8 @@ async function makeRetryDue(outboxId) {
 
 before(async () => {
   await query(
-    `INSERT INTO app_users (id, email, name)
-     VALUES ($1, $2, 'Owner'), ($3, $4, 'Other')`,
+    `INSERT INTO app_users (id, email, name, email_verified_at)
+     VALUES ($1, $2, 'Owner', NOW()), ($3, $4, 'Other', NOW())`,
     [ownerId, `logical-owner-${ownerId}@example.com`, otherId, `logical-other-${otherId}@example.com`]
   );
   await query(

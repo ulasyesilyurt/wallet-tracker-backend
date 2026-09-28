@@ -30,7 +30,7 @@ const walletId = randomUUID();
 const operationsToken = 'test_operations_token_that_is_at_least_32_chars';
 
 before(async () => {
-  await query('INSERT INTO app_users (id, email) VALUES ($1, $2)', [userId, `ops-${userId}@example.test`]);
+  await query('INSERT INTO app_users (id, email, email_verified_at) VALUES ($1, $2, NOW())', [userId, `ops-${userId}@example.test`]);
   await query(
     `INSERT INTO tracked_wallets (id, user_id, chain_id, address, status)
      VALUES ($1, $2, 'ethereum-mainnet', $3, 'active')`,

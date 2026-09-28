@@ -64,7 +64,7 @@ async function seedHoldingsCache(id, address) {
 }
 
 before(async () => {
-  await query('INSERT INTO app_users (id, email) VALUES ($1, $2), ($3, $4)', [
+  await query('INSERT INTO app_users (id, email, email_verified_at) VALUES ($1, $2, NOW()), ($3, $4, NOW())', [
     ownerId, `positions-owner-${ownerId}@example.test`,
     otherUserId, `positions-other-${otherUserId}@example.test`
   ]);

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { validate } from '../../middlewares/validate.js';
-import { authenticate } from '../../middlewares/authenticate.js';
+import { authenticateAllowUnverified } from '../../middlewares/authenticate.js';
 import {
   authCodeRequestRateLimiter, authCodeVerifyRateLimiter,
   authLoginRateLimiter, authRegisterRateLimiter
@@ -16,11 +16,11 @@ export function createAuthRouter(emailService = transactionalEmail) {
 
   router.post('/auth/register', authRegisterRateLimiter, validate(registerSchema), register);
   router.post('/auth/login', authLoginRateLimiter, validate(loginSchema), login);
-  router.get('/auth/me', authenticate, me);
-  router.post('/auth/email-verification/request', authCodeRequestRateLimiter, authenticate, async (req, res) => {
+  router.get('/auth/me', authenticateAllowUnverified, me);
+  router.post('/auth/email-verification/request', authCodeRequestRateLimiter, authenticateAllowUnverified, async (req, res) => {
     res.status(202).json({ data: await requestEmailVerification(req.auth.user, emailService) });
   });
-  router.post('/auth/email-verification/verify', authCodeVerifyRateLimiter, authenticate, validate(verifyEmailSchema), async (req, res) => {
+  router.post('/auth/email-verification/verify', authCodeVerifyRateLimiter, authenticateAllowUnverified, validate(verifyEmailSchema), async (req, res) => {
     const user = await verifyEmailCode(req.auth.user, req.validated.body.code);
     res.status(200).json({ data: { user: getCurrentUser(user) } });
   });

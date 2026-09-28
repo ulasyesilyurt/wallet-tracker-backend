@@ -55,6 +55,15 @@ test('new users remain signed in but unverified; verification is single-use', as
   const account = await register();
   assert.equal(account.user.emailVerified, false);
   const authorization = `Bearer ${account.accessToken}`;
+  const meBeforeVerification = await request(app).get('/api/v1/auth/me').set('Authorization', authorization);
+  assert.equal(meBeforeVerification.status, 200);
+  assert.equal(meBeforeVerification.body.data.user.emailVerified, false);
+  const blocked = await request(app).get(`/api/v1/users/${account.user.id}/wallets`).set('Authorization', authorization);
+  assert.equal(blocked.status, 403);
+  assert.deepEqual(blocked.body.error, {
+    code: 'AUTH_EMAIL_VERIFICATION_REQUIRED',
+    message: 'Verify your email before accessing this resource.'
+  });
   const requested = await request(app).post('/api/v1/auth/email-verification/request').set('Authorization', authorization);
   assert.equal(requested.status, 202);
   const challenge = await latestChallenge(account.user.id, 'verify_email');
@@ -73,10 +82,49 @@ test('new users remain signed in but unverified; verification is single-use', as
     .set('Authorization', authorization).send({ code: sent.at(-1).code });
   assert.equal(verified.status, 200);
   assert.equal(verified.body.data.user.emailVerified, true);
+  const accessibleWithSameToken = await request(app).get(`/api/v1/users/${account.user.id}/wallets`).set('Authorization', authorization);
+  assert.equal(accessibleWithSameToken.status, 200);
   const replay = await request(app).post('/api/v1/auth/email-verification/verify')
     .set('Authorization', authorization).send({ code: sent.at(-1).code });
   assert.equal(replay.status, 400);
   assert.equal((await request(app).get('/api/v1/auth/me').set('Authorization', authorization)).body.data.user.emailVerified, true);
+});
+
+test('unverified tokens are blocked across protected route modules before handlers run', async () => {
+  const account = await register();
+  const authorization = `Bearer ${account.accessToken}`;
+  const walletId = randomUUID();
+  for (const path of [
+    '/api/v1/activity',
+    '/api/v1/notifications',
+    '/api/v1/portfolio/performance',
+    `/api/v1/wallets/${walletId}/events`,
+    `/api/v1/wallets/${walletId}/holdings`,
+    `/api/v1/wallets/${walletId}/positions`,
+    `/api/v1/wallets/${walletId}/portfolio-summary`,
+    `/api/v1/wallets/${walletId}/performance`
+  ]) {
+    const response = await request(app).get(path).set('Authorization', authorization);
+    assert.equal(response.status, 403, path);
+    assert.equal(response.body.error.code, 'AUTH_EMAIL_VERIFICATION_REQUIRED', path);
+  }
+  const deviceToken = await request(app).post(`/api/v1/users/${account.user.id}/device-tokens`)
+    .set('Authorization', authorization).send({});
+  assert.equal(deviceToken.status, 403);
+  assert.equal(deviceToken.body.error.code, 'AUTH_EMAIL_VERIFICATION_REQUIRED');
+});
+
+test('unverified sign-in still returns a token limited to the verification flow', async () => {
+  const account = await register();
+  const loggedIn = await request(app).post('/api/v1/auth/login')
+    .send({ email: account.user.email, password });
+  assert.equal(loggedIn.status, 200);
+  assert.equal(loggedIn.body.data.user.emailVerified, false);
+  const authorization = `Bearer ${loggedIn.body.data.accessToken}`;
+  assert.equal((await request(app).get(`/api/v1/users/${account.user.id}/wallets`)
+    .set('Authorization', authorization)).status, 403);
+  assert.equal((await request(app).post('/api/v1/auth/email-verification/request')
+    .set('Authorization', authorization)).status, 202);
 });
 
 test('expired verification fails; resend supersedes the earlier challenge', async () => {
@@ -190,4 +238,21 @@ test('migration policy keeps preexisting users verified without changing login',
   assert.equal(loggedIn.status, 200);
   assert.equal(loggedIn.body.data.user.emailVerified, true);
   assert.equal(typeof loggedIn.body.data.accessToken, 'string');
+  const wallets = await request(app).get(`/api/v1/users/${loggedIn.body.data.user.id}/wallets`)
+    .set('Authorization', `Bearer ${loggedIn.body.data.accessToken}`);
+  assert.equal(wallets.status, 200);
+});
+
+test('grandfathered legacy account without email keeps protected access', async () => {
+  const userId = randomUUID();
+  const { createAccessToken } = await import('../src/utils/jwt.js');
+  await query('INSERT INTO app_users (id, email_verified_at) VALUES ($1, NOW())', [userId]);
+  try {
+    const token = await createAccessToken({ id: userId });
+    const response = await request(app).get(`/api/v1/users/${userId}/wallets`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(response.status, 200);
+  } finally {
+    await query('DELETE FROM app_users WHERE id = $1', [userId]);
+  }
 });

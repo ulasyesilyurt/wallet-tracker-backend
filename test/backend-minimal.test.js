@@ -76,10 +76,10 @@ const persistedHoldingsPayload = {
 async function seedAuthorizationFixtures() {
   await query(
     `
-      INSERT INTO app_users (id, email, name, password_hash)
+      INSERT INTO app_users (id, email, name, password_hash, email_verified_at)
       VALUES
-        ($1, LOWER($2), 'Owner', NULL),
-        ($3, LOWER($4), 'Non Owner', NULL)
+        ($1, LOWER($2), 'Owner', NULL, NOW()),
+        ($3, LOWER($4), 'Non Owner', NULL, NOW())
     `,
     [ownerUser.id, ownerUser.email, nonOwnerUser.id, nonOwnerUser.email]
   );

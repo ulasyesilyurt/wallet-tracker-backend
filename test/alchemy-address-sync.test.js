@@ -96,7 +96,7 @@ test('wallet create keeps its API success shape when both chains sync', async ()
   const address = randomAddress();
 
   try {
-    await query('INSERT INTO app_users (id) VALUES ($1)', [userId]);
+    await query('INSERT INTO app_users (id, email_verified_at) VALUES ($1, NOW())', [userId]);
     const response = await request(app)
       .post(`/api/v1/users/${userId}/wallets`)
       .set('Authorization', `Bearer ${token}`)
@@ -119,7 +119,7 @@ for (const failedChain of [ethereum, base]) {
     const address = randomAddress();
 
     try {
-      await query('INSERT INTO app_users (id) VALUES ($1)', [userId]);
+      await query('INSERT INTO app_users (id, email_verified_at) VALUES ($1, NOW())', [userId]);
       const response = await request(app)
         .post(`/api/v1/users/${userId}/wallets`)
         .set('Authorization', `Bearer ${token}`)
@@ -144,7 +144,7 @@ test('wallet update reports Base sync failure after persisting the chain change'
   const address = randomAddress();
 
   try {
-    await query('INSERT INTO app_users (id) VALUES ($1)', [userId]);
+    await query('INSERT INTO app_users (id, email_verified_at) VALUES ($1, NOW())', [userId]);
     const created = await request(app)
       .post(`/api/v1/users/${userId}/wallets`)
       .set('Authorization', `Bearer ${token}`)
@@ -173,7 +173,7 @@ test('wallet delete reports sync failure after deleting the wallet', async () =>
   const address = randomAddress();
 
   try {
-    await query('INSERT INTO app_users (id) VALUES ($1)', [userId]);
+    await query('INSERT INTO app_users (id, email_verified_at) VALUES ($1, NOW())', [userId]);
     const created = await request(app)
       .post(`/api/v1/users/${userId}/wallets`)
       .set('Authorization', `Bearer ${token}`)
@@ -217,7 +217,7 @@ test('removal rechecks the database and keeps addresses still used by a wallet',
   const walletId = randomUUID();
   const address = randomAddress();
 
-  await query('INSERT INTO app_users (id) VALUES ($1)', [userId]);
+  await query('INSERT INTO app_users (id, email_verified_at) VALUES ($1, NOW())', [userId]);
   await query(
     "INSERT INTO tracked_wallets (id, user_id, chain_id, address, status) VALUES ($1, $2, $3, $4, 'active')",
     [walletId, userId, ethereum, address]

@@ -40,6 +40,23 @@ export function createAppleSignInController(signInApple) {
   };
 }
 
+export function createIdentityLinkController(identityManagement) {
+  return async (req, res) => {
+    res.status(200).json({ data: await identityManagement.link(req.auth, req.validated.body) });
+  };
+}
+
+export function createIdentityUnlinkController(identityManagement) {
+  return async (req, res) => {
+    res.status(200).json({
+      data: await identityManagement.unlink(req.auth, {
+        provider: req.validated.params.provider,
+        currentPassword: req.validated.body.currentPassword
+      })
+    });
+  };
+}
+
 export async function refresh(req, res) {
   res.status(200).json({
     data: await refreshUser(req.body?.refreshToken)

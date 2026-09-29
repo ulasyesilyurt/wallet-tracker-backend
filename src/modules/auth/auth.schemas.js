@@ -33,6 +33,30 @@ export const appleSignInSchema = z.object({
   }).strict()
 });
 
+const identityProviderSchema = z.enum(['google', 'apple']);
+const currentPasswordProof = z.string().optional();
+
+export const linkIdentitySchema = z.object({
+  body: z.discriminatedUnion('provider', [
+    z.object({
+      provider: z.literal('google'),
+      idToken: z.string().min(1).max(16_384),
+      currentPassword: currentPasswordProof
+    }).strict(),
+    z.object({
+      provider: z.literal('apple'),
+      identityToken: z.string().min(1).max(16_384),
+      expectedNonce: z.string().min(1).max(512),
+      currentPassword: currentPasswordProof
+    }).strict()
+  ])
+});
+
+export const unlinkIdentitySchema = z.object({
+  params: z.object({ provider: identityProviderSchema }),
+  body: z.object({ currentPassword: currentPasswordProof }).strict()
+});
+
 const codeSchema = z.string().regex(/^\d{6}$/, 'Code must contain exactly 6 digits.');
 
 export const verifyEmailSchema = z.object({ body: z.object({ code: codeSchema }) });

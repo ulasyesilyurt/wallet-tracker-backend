@@ -166,7 +166,8 @@ an email already used by ChainBell, the route returns `409 AUTH_LINK_REQUIRED`
 without creating a session or linking accounts. An unknown subject without a
 usable email returns `422 AUTH_EMAIL_REQUIRED`. Invalid provider tokens return
 `401 AUTH_INVALID_PROVIDER_TOKEN`; disabled or misconfigured verification
-returns `503 AUTH_PROVIDER_UNAVAILABLE`. No linking endpoint is exposed.
+returns `503 AUTH_PROVIDER_UNAVAILABLE`. Provider management is described in
+Phase 4D below.
 
 Phase 4C adds `POST /api/v1/auth/apple` with JSON body
 `{"identityToken":"...","expectedNonce":"..."}`. The expected nonce is
@@ -189,7 +190,39 @@ not email or relay address, is the identity key. Existing email collisions
 return `409 AUTH_LINK_REQUIRED`; unknown subjects without usable email return
 `422 AUTH_EMAIL_REQUIRED`. Apple sign-in has its own per-IP limit,
 `AUTH_APPLE_RATE_LIMIT_MAX` (default 30 per auth rate-limit window). Profile
-name is left null; no linking or Apple account-management endpoints are added.
+name is left null; provider management is described in Phase 4D below.
+
+Phase 4D adds explicit provider management for verified, session-backed
+accounts. `POST /api/v1/auth/identities/link` takes a Bearer access token and
+one of these JSON bodies:
+
+```json
+{"provider":"google","idToken":"...","currentPassword":"..."}
+{"provider":"apple","identityToken":"...","expectedNonce":"...","currentPassword":"..."}
+```
+
+The current password is checked before the provider token. The user row and
+current session are then locked and rechecked before the identity is inserted.
+The provider's signed `sub` is the identity key; provider email never chooses,
+merges, or changes a ChainBell account. Repeating a link of the same identity
+returns `200 {"data":{"provider":"google|apple","linked":true}}`. A provider
+already on the account returns `409 AUTH_IDENTITY_ALREADY_LINKED`; a subject
+owned by another account returns `409 AUTH_IDENTITY_LINKED_ELSEWHERE` without
+account details.
+
+`DELETE /api/v1/auth/identities/:provider` takes a Bearer token and JSON body
+`{"currentPassword":"..."}`. It returns
+`200 {"data":{"provider":"google|apple","unlinked":true}}`. It removes only
+the current user's identity. A provider cannot be removed if it is the last
+usable login method (`409 AUTH_LAST_LOGIN_METHOD`). Missing or incorrect
+current passwords yield `AUTH_REAUTH_REQUIRED` or `AUTH_REAUTH_FAILED`. For
+social-only users, fresh provider reauthentication is deferred: adding a
+provider returns `AUTH_REAUTH_METHOD_UNAVAILABLE`, and removing one of several
+providers also returns that error. No identity change is authorized by the
+Bearer token alone. The existing session and refresh credential stay valid
+after a successful change; no JWT claims change. Both endpoints share a
+per-IP limit of `AUTH_IDENTITY_MANAGEMENT_RATE_LIMIT_MAX` (default 20 per auth
+rate-limit window). Existing email verification rules still apply.
 
 ### Email verification and password recovery
 

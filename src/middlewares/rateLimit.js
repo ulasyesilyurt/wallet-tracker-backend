@@ -46,6 +46,12 @@ export const authAppleRateLimiter = createRateLimiter({
   message: 'Too many Apple sign-in attempts. Please try again later.'
 });
 
+export const authIdentityManagementRateLimiter = createRateLimiter({
+  windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_IDENTITY_MANAGEMENT_RATE_LIMIT_MAX,
+  message: 'Too many identity changes. Please try again later.'
+});
+
 export const authRegisterRateLimiter = createRateLimiter({
   windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
   limit: env.AUTH_REGISTER_RATE_LIMIT_MAX,

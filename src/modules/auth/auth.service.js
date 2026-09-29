@@ -1,7 +1,8 @@
 import { createAccessToken } from '../../utils/jwt.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
 import { HttpError } from '../../utils/httpError.js';
-import { createUser, findUserByEmail } from './auth.repository.js';
+import { createUserWithSession, findUserByEmail } from './auth.repository.js';
+import { createSessionForPassword, revokeLegacyAccess, revokeSession } from './session.repository.js';
 
 const EMAIL_UNIQUE_CONSTRAINTS = new Set([
   'app_users_email_key',
@@ -23,10 +24,10 @@ function sanitizeUser(user) {
   };
 }
 
-async function buildAuthResponse(user) {
+async function buildAuthResponse(user, sessionId) {
   return {
     user: sanitizeUser(user),
-    accessToken: await createAccessToken(user)
+    accessToken: await createAccessToken(user, sessionId)
   };
 }
 
@@ -38,9 +39,9 @@ export async function registerUser({ email, password, name }) {
   }
 
   const passwordHash = await hashPassword(password);
-  let user;
+  let account;
   try {
-    user = await createUser({
+    account = await createUserWithSession({
       email,
       passwordHash,
       name
@@ -52,7 +53,7 @@ export async function registerUser({ email, password, name }) {
     throw error;
   }
 
-  return buildAuthResponse(user);
+  return buildAuthResponse(account.user, account.sessionId);
 }
 
 export async function loginUser({ email, password }) {
@@ -68,7 +69,20 @@ export async function loginUser({ email, password }) {
     throw new HttpError(401, 'AUTH_INVALID_CREDENTIALS', 'Invalid email or password.');
   }
 
-  return buildAuthResponse(user);
+  const sessionId = await createSessionForPassword(user.id, user.passwordHash);
+  if (!sessionId) {
+    throw new HttpError(401, 'AUTH_INVALID_CREDENTIALS', 'Invalid email or password.');
+  }
+  return buildAuthResponse(user, sessionId);
+}
+
+export async function logoutUser({ user, payload }) {
+  if (payload.sid) {
+    await revokeSession(payload.sid, user.id);
+  } else {
+    await revokeLegacyAccess(user.id, payload.iat);
+  }
+  return { message: 'Logged out.' };
 }
 
 export function getCurrentUser(user) {

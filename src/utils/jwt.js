@@ -3,13 +3,15 @@ import { env } from '../config/env.js';
 import { HttpError } from './httpError.js';
 
 const accessTokenSecret = new TextEncoder().encode(env.JWT_SECRET);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export async function createAccessToken(user) {
+export async function createAccessToken(user, sessionId) {
   const nowInSeconds = Math.floor(Date.now() / 1000);
 
   return new SignJWT({
     email: user.email,
-    type: 'access'
+    type: 'access',
+    ...(sessionId === undefined ? {} : { sid: sessionId })
   })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setSubject(user.id)
@@ -32,8 +34,18 @@ export async function verifyAccessToken(token) {
       throw new HttpError(401, 'AUTH_INVALID_TOKEN', 'Invalid access token.');
     }
 
+    const hasSessionId = Object.hasOwn(payload, 'sid');
+    if (hasSessionId && (typeof payload.sid !== 'string' || !UUID_PATTERN.test(payload.sid))) {
+      throw new HttpError(401, 'AUTH_INVALID_TOKEN', 'Invalid access token.');
+    }
+    if (!hasSessionId && (!Number.isSafeInteger(payload.iat) || payload.iat <= 0 ||
+        payload.iat > Math.floor(Date.now() / 1000))) {
+      throw new HttpError(401, 'AUTH_INVALID_TOKEN', 'Invalid access token.');
+    }
+
     return {
       sub: payload.sub,
+      sid: hasSessionId ? payload.sid : undefined,
       email: typeof payload.email === 'string' ? payload.email : undefined,
       type: payload.type,
       iat: payload.iat,

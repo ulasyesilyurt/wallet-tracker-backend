@@ -68,7 +68,15 @@ export async function consumeChallenge({ userId, purpose, matches, passwordHash 
     if (purpose === 'verify_email') {
       await client.query('UPDATE app_users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = $1', [userId]);
     } else {
-      await client.query('UPDATE app_users SET password_hash = $2, updated_at = NOW() WHERE id = $1', [userId, passwordHash]);
+      await client.query(`
+        UPDATE app_users SET password_hash = $2, updated_at = NOW(),
+          legacy_access_revoked_at = clock_timestamp()
+        WHERE id = $1
+      `, [userId, passwordHash]);
+      await client.query(`
+        UPDATE auth_sessions SET revoked_at = clock_timestamp()
+        WHERE user_id = $1 AND revoked_at IS NULL
+      `, [userId]);
     }
     return true;
   });

@@ -99,6 +99,18 @@ describe('JWT verification', () => {
     await expectHttpError(verifyAccessToken(wrongTypeToken), 'AUTH_INVALID_TOKEN');
   });
 
+  test('rejects a malformed session id and a legacy token without issued-at', async () => {
+    const nowInSeconds = Math.floor(Date.now() / 1000);
+    const base = {
+      sub: '7e0c3fca-e5a4-43c8-81ef-61f2578ca0da',
+      type: 'access',
+      exp: nowInSeconds + 3600
+    };
+    await expectHttpError(verifyAccessToken(buildLegacyHs256Token({ ...base, sid: 'invalid', iat: nowInSeconds })),
+      'AUTH_INVALID_TOKEN');
+    await expectHttpError(verifyAccessToken(buildLegacyHs256Token(base)), 'AUTH_INVALID_TOKEN');
+  });
+
   test('accepts a legacy custom HS256 token', async () => {
     const nowInSeconds = Math.floor(Date.now() / 1000);
     const legacyToken = buildLegacyHs256Token({

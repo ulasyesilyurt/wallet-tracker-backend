@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { validate } from '../../middlewares/validate.js';
-import { authenticateAllowUnverified } from '../../middlewares/authenticate.js';
+import { authenticateAllowUnverified, authenticateForLogout } from '../../middlewares/authenticate.js';
 import {
   authCodeRequestRateLimiter, authCodeVerifyRateLimiter,
   authLoginRateLimiter, authRegisterRateLimiter
@@ -8,7 +8,7 @@ import {
 import { login, me, register } from './auth.controller.js';
 import { forgotPasswordSchema, loginSchema, registerSchema, resetPasswordSchema, verifyEmailSchema } from './auth.schemas.js';
 import { transactionalEmail } from '../../services/transactionalEmail.js';
-import { getCurrentUser } from './auth.service.js';
+import { getCurrentUser, logoutUser } from './auth.service.js';
 import { requestEmailVerification, requestPasswordReset, resetPassword, verifyEmailCode } from './challenge.service.js';
 
 export function createAuthRouter(emailService = transactionalEmail) {
@@ -16,6 +16,9 @@ export function createAuthRouter(emailService = transactionalEmail) {
 
   router.post('/auth/register', authRegisterRateLimiter, validate(registerSchema), register);
   router.post('/auth/login', authLoginRateLimiter, validate(loginSchema), login);
+  router.post('/auth/logout', authenticateForLogout, async (req, res) => {
+    res.status(200).json({ data: await logoutUser(req.auth) });
+  });
   router.get('/auth/me', authenticateAllowUnverified, me);
   router.post('/auth/email-verification/request', authCodeRequestRateLimiter, authenticateAllowUnverified, async (req, res) => {
     res.status(202).json({ data: await requestEmailVerification(req.auth.user, emailService) });

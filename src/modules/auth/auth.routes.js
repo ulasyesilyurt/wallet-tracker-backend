@@ -3,9 +3,9 @@ import { validate } from '../../middlewares/validate.js';
 import { authenticateAllowUnverified, authenticateForLogout } from '../../middlewares/authenticate.js';
 import {
   authCodeRequestRateLimiter, authCodeVerifyRateLimiter,
-  authLoginRateLimiter, authRegisterRateLimiter
+  authLoginRateLimiter, authRefreshRateLimiter, authRegisterRateLimiter
 } from '../../middlewares/rateLimit.js';
-import { login, me, register } from './auth.controller.js';
+import { login, me, refresh, register } from './auth.controller.js';
 import { forgotPasswordSchema, loginSchema, registerSchema, resetPasswordSchema, verifyEmailSchema } from './auth.schemas.js';
 import { transactionalEmail } from '../../services/transactionalEmail.js';
 import { getCurrentUser, logoutUser } from './auth.service.js';
@@ -16,6 +16,7 @@ export function createAuthRouter(emailService = transactionalEmail) {
 
   router.post('/auth/register', authRegisterRateLimiter, validate(registerSchema), register);
   router.post('/auth/login', authLoginRateLimiter, validate(loginSchema), login);
+  router.post('/auth/refresh', authRefreshRateLimiter, refresh);
   router.post('/auth/logout', authenticateForLogout, async (req, res) => {
     res.status(200).json({ data: await logoutUser(req.auth) });
   });

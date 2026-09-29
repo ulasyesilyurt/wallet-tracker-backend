@@ -2,7 +2,8 @@ import { createAccessToken } from '../../utils/jwt.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
 import { HttpError } from '../../utils/httpError.js';
 import { createUserWithSession, findUserByEmail } from './auth.repository.js';
-import { createSessionForPassword, revokeLegacyAccess, revokeSession } from './session.repository.js';
+import { createSessionForPassword, revokeLegacyAccess, revokeSession, rotateRefreshToken } from './session.repository.js';
+import { createRefreshCredential } from './refreshToken.js';
 
 const EMAIL_UNIQUE_CONSTRAINTS = new Set([
   'app_users_email_key',
@@ -24,14 +25,15 @@ function sanitizeUser(user) {
   };
 }
 
-async function buildAuthResponse(user, sessionId) {
+async function buildAuthResponse(user, sessionId, refreshCredential) {
   return {
     user: sanitizeUser(user),
-    accessToken: await createAccessToken(user, sessionId)
+    accessToken: await createAccessToken(user, sessionId),
+    ...(refreshCredential ? { refreshToken: refreshCredential.token } : {})
   };
 }
 
-export async function registerUser({ email, password, name }) {
+export async function registerUser({ email, password, name }, { issueRefreshToken = false } = {}) {
   const existingUser = await findUserByEmail(email);
 
   if (existingUser) {
@@ -39,12 +41,14 @@ export async function registerUser({ email, password, name }) {
   }
 
   const passwordHash = await hashPassword(password);
+  const refreshCredential = issueRefreshToken ? createRefreshCredential() : null;
   let account;
   try {
     account = await createUserWithSession({
       email,
       passwordHash,
-      name
+      name,
+      refreshCredential
     });
   } catch (error) {
     if (error?.code === '23505' && EMAIL_UNIQUE_CONSTRAINTS.has(error.constraint)) {
@@ -53,10 +57,10 @@ export async function registerUser({ email, password, name }) {
     throw error;
   }
 
-  return buildAuthResponse(account.user, account.sessionId);
+  return buildAuthResponse(account.user, account.sessionId, refreshCredential);
 }
 
-export async function loginUser({ email, password }) {
+export async function loginUser({ email, password }, { issueRefreshToken = false } = {}) {
   const user = await findUserByEmail(email);
 
   if (!user?.passwordHash) {
@@ -69,11 +73,21 @@ export async function loginUser({ email, password }) {
     throw new HttpError(401, 'AUTH_INVALID_CREDENTIALS', 'Invalid email or password.');
   }
 
-  const sessionId = await createSessionForPassword(user.id, user.passwordHash);
+  const refreshCredential = issueRefreshToken ? createRefreshCredential() : null;
+  const sessionId = await createSessionForPassword(user.id, user.passwordHash, refreshCredential);
   if (!sessionId) {
     throw new HttpError(401, 'AUTH_INVALID_CREDENTIALS', 'Invalid email or password.');
   }
-  return buildAuthResponse(user, sessionId);
+  return buildAuthResponse(user, sessionId, refreshCredential);
+}
+
+export async function refreshUser(refreshToken) {
+  const refreshed = await rotateRefreshToken(refreshToken);
+  return {
+    user: sanitizeUser(refreshed.user),
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken
+  };
 }
 
 export async function logoutUser({ user, payload }) {

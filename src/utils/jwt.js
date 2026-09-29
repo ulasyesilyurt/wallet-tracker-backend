@@ -5,13 +5,14 @@ import { HttpError } from './httpError.js';
 const accessTokenSecret = new TextEncoder().encode(env.JWT_SECRET);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export async function createAccessToken(user, sessionId) {
+export async function createAccessToken(user, sessionId, { tokenId } = {}) {
   const nowInSeconds = Math.floor(Date.now() / 1000);
 
   return new SignJWT({
     email: user.email,
     type: 'access',
-    ...(sessionId === undefined ? {} : { sid: sessionId })
+    ...(sessionId === undefined ? {} : { sid: sessionId }),
+    ...(tokenId === undefined ? {} : { jti: tokenId })
   })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setSubject(user.id)

@@ -1,7 +1,11 @@
-import { getCurrentUser, loginUser, registerUser } from './auth.service.js';
+import { getCurrentUser, loginUser, refreshUser, registerUser } from './auth.service.js';
+
+function wantsRefreshToken(req) {
+  return req.get('x-auth-refresh') === 'true';
+}
 
 export async function register(req, res) {
-  const authResponse = await registerUser(req.validated.body);
+  const authResponse = await registerUser(req.validated.body, { issueRefreshToken: wantsRefreshToken(req) });
 
   res.status(201).json({
     data: authResponse
@@ -9,10 +13,16 @@ export async function register(req, res) {
 }
 
 export async function login(req, res) {
-  const authResponse = await loginUser(req.validated.body);
+  const authResponse = await loginUser(req.validated.body, { issueRefreshToken: wantsRefreshToken(req) });
 
   res.status(200).json({
     data: authResponse
+  });
+}
+
+export async function refresh(req, res) {
+  res.status(200).json({
+    data: await refreshUser(req.body?.refreshToken)
   });
 }
 

@@ -40,6 +40,12 @@ export const authRegisterRateLimiter = createRateLimiter({
   message: 'Too many registration attempts. Please try again later.'
 });
 
+export const authRefreshRateLimiter = createRateLimiter({
+  windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_REFRESH_RATE_LIMIT_MAX,
+  message: 'Too many refresh attempts. Please try again later.'
+});
+
 export const authCodeRequestRateLimiter = createRateLimiter({
   windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
   limit: env.AUTH_REGISTER_RATE_LIMIT_MAX,

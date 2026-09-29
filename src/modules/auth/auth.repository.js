@@ -15,7 +15,7 @@ function mapUser(row) {
   };
 }
 
-export async function createUserWithSession({ email, passwordHash, name }) {
+export async function createUserWithSession({ email, passwordHash, name, refreshCredential }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -26,7 +26,7 @@ export async function createUserWithSession({ email, passwordHash, name }) {
         legacy_access_revoked_at, created_at, updated_at
     `, [email, passwordHash, name ?? null]);
     const user = mapUser(result.rows[0]);
-    const sessionId = await insertSession(client, user.id);
+    const sessionId = await insertSession(client, user.id, refreshCredential);
     await client.query('COMMIT');
     return { user, sessionId };
   } catch (error) {

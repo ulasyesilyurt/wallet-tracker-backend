@@ -34,6 +34,12 @@ export const authLoginRateLimiter = createRateLimiter({
   message: 'Too many login attempts. Please try again later.'
 });
 
+export const authGoogleRateLimiter = createRateLimiter({
+  windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_GOOGLE_RATE_LIMIT_MAX,
+  message: 'Too many Google sign-in attempts. Please try again later.'
+});
+
 export const authRegisterRateLimiter = createRateLimiter({
   windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
   limit: env.AUTH_REGISTER_RATE_LIMIT_MAX,

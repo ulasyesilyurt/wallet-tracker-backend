@@ -18,7 +18,8 @@ export function createApiRouter({
   isShuttingDown = () => false,
   operationsToken = '',
   getOperationalStatus = async () => ({ status: 'unavailable' }),
-  authEmailService
+  authEmailService,
+  authGoogleVerifier
 } = {}) {
   const router = Router();
 
@@ -46,7 +47,7 @@ export function createApiRouter({
 
   router.use(createOperationsRouter({ token: operationsToken, getStatus: getOperationalStatus }));
 
-  router.use(createAuthRouter(authEmailService));
+  router.use(createAuthRouter(authEmailService, { googleVerifier: authGoogleVerifier }));
   router.use(walletsRouter);
   router.use(deviceTokensRouter);
   router.use(eventsRouter);

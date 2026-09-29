@@ -122,7 +122,7 @@ Authentication is handled through JWT-based application sessions.
 
 Phase 4A adds migration `024_auth_identities.sql` for Google and Apple provider
 subject mappings. Apply it before deploying code that uses the identity repository.
-No social sign-in, account creation, or linking routes are exposed in this phase.
+Phase 4A did not expose sign-in or linking routes.
 The repository supports one Google and one Apple identity per user; a provider
 subject belongs to only one user. Existing password accounts are not backfilled.
 
@@ -146,6 +146,28 @@ must not be used to auto-link a ChainBell account; Google's `email_verified`
 alone does not establish current ownership of every third-party email address.
 Apple email can be omitted or be a private relay address, and the first-login
 name is not a signed ID-token claim.
+
+Phase 4B adds `POST /api/v1/auth/google` with JSON body `{"idToken":"..."}`.
+It verifies the Google ID token before accessing the database. A known Google
+subject signs in to its mapped user without updating the account email or its
+verification state. A new subject with an unused usable email creates a user
+with no password or name, a Google identity, and an auth session in one
+transaction. `X-Auth-Refresh: true` adds `data.refreshToken` to the standard
+`data.user` and `data.accessToken` response, as on password sign-in. The
+Google route has a separate per-IP limit, `AUTH_GOOGLE_RATE_LIMIT_MAX` (default
+30 per `AUTH_RATE_LIMIT_WINDOW_MS`).
+
+Only a signed `email_verified` claim together with a `gmail.com` address, or
+a signed `email_verified` claim and an `hd` value equal to the email domain,
+marks a newly created ChainBell account verified. Other Google emails start
+unverified and remain subject to the existing email-code gate. Email never
+identifies an existing Google account. If an unknown Google subject supplies
+an email already used by ChainBell, the route returns `409 AUTH_LINK_REQUIRED`
+without creating a session or linking accounts. An unknown subject without a
+usable email returns `422 AUTH_EMAIL_REQUIRED`. Invalid provider tokens return
+`401 AUTH_INVALID_PROVIDER_TOKEN`; disabled or misconfigured verification
+returns `503 AUTH_PROVIDER_UNAVAILABLE`. No Apple sign-in or linking endpoint is
+exposed in Phase 4B.
 
 ### Email verification and password recovery
 

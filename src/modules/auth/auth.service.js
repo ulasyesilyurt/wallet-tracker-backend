@@ -25,7 +25,7 @@ function sanitizeUser(user) {
   };
 }
 
-async function buildAuthResponse(user, sessionId, refreshCredential) {
+export async function buildAuthResponse(user, sessionId, refreshCredential) {
   return {
     user: sanitizeUser(user),
     accessToken: await createAccessToken(user, sessionId),

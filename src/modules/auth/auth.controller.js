@@ -20,6 +20,15 @@ export async function login(req, res) {
   });
 }
 
+export function createGoogleSignInController(signInGoogle) {
+  return async (req, res) => {
+    const authResponse = await signInGoogle(req.validated.body.idToken, {
+      issueRefreshToken: wantsRefreshToken(req)
+    });
+    res.status(200).json({ data: authResponse });
+  };
+}
+
 export async function refresh(req, res) {
   res.status(200).json({
     data: await refreshUser(req.body?.refreshToken)

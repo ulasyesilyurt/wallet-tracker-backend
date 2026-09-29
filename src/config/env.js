@@ -55,6 +55,7 @@ const envSchema = z.object({
   GLOBAL_API_RATE_LIMIT_MAX: z.coerce.number().int().min(0).default(300),
   AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
   AUTH_LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
+  AUTH_GOOGLE_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
   AUTH_REFRESH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
   AUTH_REGISTER_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(5),
   DEFAULT_WALLET_ALERT_MINIMUM_USD: z.coerce.number().positive().default(100),

@@ -3,23 +3,31 @@ import { validate } from '../../middlewares/validate.js';
 import { authenticateAllowUnverified, authenticateForLogout } from '../../middlewares/authenticate.js';
 import {
   authCodeRequestRateLimiter, authCodeVerifyRateLimiter,
+  authAppleRateLimiter,
   authGoogleRateLimiter, authLoginRateLimiter, authRefreshRateLimiter, authRegisterRateLimiter
 } from '../../middlewares/rateLimit.js';
-import { createGoogleSignInController, login, me, refresh, register } from './auth.controller.js';
-import { forgotPasswordSchema, googleSignInSchema, loginSchema, registerSchema, resetPasswordSchema, verifyEmailSchema } from './auth.schemas.js';
+import { createAppleSignInController, createGoogleSignInController, login, me, refresh, register } from './auth.controller.js';
+import { appleSignInSchema, forgotPasswordSchema, googleSignInSchema, loginSchema, registerSchema, resetPasswordSchema, verifyEmailSchema } from './auth.schemas.js';
 import { transactionalEmail } from '../../services/transactionalEmail.js';
 import { getCurrentUser, logoutUser } from './auth.service.js';
 import { requestEmailVerification, requestPasswordReset, resetPassword, verifyEmailCode } from './challenge.service.js';
 import { createGoogleSignIn } from './google.service.js';
 import { verifyGoogleIdToken } from './google.verifier.js';
+import { createAppleSignIn } from './apple.service.js';
+import { verifyAppleIdToken } from './apple.verifier.js';
 
-export function createAuthRouter(emailService = transactionalEmail, { googleVerifier = verifyGoogleIdToken } = {}) {
+export function createAuthRouter(emailService = transactionalEmail, {
+  googleVerifier = verifyGoogleIdToken,
+  appleVerifier = verifyAppleIdToken
+} = {}) {
   const router = Router();
 
   router.post('/auth/register', authRegisterRateLimiter, validate(registerSchema), register);
   router.post('/auth/login', authLoginRateLimiter, validate(loginSchema), login);
   router.post('/auth/google', authGoogleRateLimiter, validate(googleSignInSchema),
     createGoogleSignInController(createGoogleSignIn({ verifyToken: googleVerifier })));
+  router.post('/auth/apple', authAppleRateLimiter, validate(appleSignInSchema),
+    createAppleSignInController(createAppleSignIn({ verifyToken: appleVerifier })));
   router.post('/auth/refresh', authRefreshRateLimiter, refresh);
   router.post('/auth/logout', authenticateForLogout, async (req, res) => {
     res.status(200).json({ data: await logoutUser(req.auth) });

@@ -29,6 +29,17 @@ export function createGoogleSignInController(signInGoogle) {
   };
 }
 
+export function createAppleSignInController(signInApple) {
+  return async (req, res) => {
+    const authResponse = await signInApple(
+      req.validated.body.identityToken,
+      req.validated.body.expectedNonce,
+      { issueRefreshToken: wantsRefreshToken(req) }
+    );
+    res.status(200).json({ data: authResponse });
+  };
+}
+
 export async function refresh(req, res) {
   res.status(200).json({
     data: await refreshUser(req.body?.refreshToken)

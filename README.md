@@ -166,8 +166,30 @@ an email already used by ChainBell, the route returns `409 AUTH_LINK_REQUIRED`
 without creating a session or linking accounts. An unknown subject without a
 usable email returns `422 AUTH_EMAIL_REQUIRED`. Invalid provider tokens return
 `401 AUTH_INVALID_PROVIDER_TOKEN`; disabled or misconfigured verification
-returns `503 AUTH_PROVIDER_UNAVAILABLE`. No Apple sign-in or linking endpoint is
-exposed in Phase 4B.
+returns `503 AUTH_PROVIDER_UNAVAILABLE`. No linking endpoint is exposed.
+
+Phase 4C adds `POST /api/v1/auth/apple` with JSON body
+`{"identityToken":"...","expectedNonce":"..."}`. The expected nonce is
+required and must equal the nonce claim in Apple's signed identity token. If
+the client sends Apple a SHA-256 hash of a raw nonce, it must send that exact
+hash as `expectedNonce` to this backend. A missing nonce is a request validation
+error; a mismatched nonce is `401 AUTH_INVALID_PROVIDER_TOKEN`. Because the
+expected value comes from the client and is not bound to a server-issued
+challenge, this comparison alone is not one-time replay protection. This phase
+does not persist nonce challenges or exchange Apple authorization codes.
+
+A known Apple subject signs in to its existing ChainBell user even when Apple
+omits email, and never changes the stored email or verification state. A new
+subject with an unused usable email creates a passwordless user, Apple
+identity, and session atomically; `X-Auth-Refresh: true` adds the usual rotating
+refresh credential. A signed `email_verified` true claim marks that new
+ChainBell email verified, including an Apple private relay address. A false or
+absent claim leaves it behind the normal email-code gate. The signed subject,
+not email or relay address, is the identity key. Existing email collisions
+return `409 AUTH_LINK_REQUIRED`; unknown subjects without usable email return
+`422 AUTH_EMAIL_REQUIRED`. Apple sign-in has its own per-IP limit,
+`AUTH_APPLE_RATE_LIMIT_MAX` (default 30 per auth rate-limit window). Profile
+name is left null; no linking or Apple account-management endpoints are added.
 
 ### Email verification and password recovery
 

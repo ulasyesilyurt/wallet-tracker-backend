@@ -40,6 +40,12 @@ export const authGoogleRateLimiter = createRateLimiter({
   message: 'Too many Google sign-in attempts. Please try again later.'
 });
 
+export const authAppleRateLimiter = createRateLimiter({
+  windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_APPLE_RATE_LIMIT_MAX,
+  message: 'Too many Apple sign-in attempts. Please try again later.'
+});
+
 export const authRegisterRateLimiter = createRateLimiter({
   windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
   limit: env.AUTH_REGISTER_RATE_LIMIT_MAX,

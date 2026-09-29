@@ -120,6 +120,33 @@ The Ethereum polling tracker remains available only for fallback, debugging, or 
 
 Authentication is handled through JWT-based application sessions.
 
+Phase 4A adds migration `024_auth_identities.sql` for Google and Apple provider
+subject mappings. Apply it before deploying code that uses the identity repository.
+No social sign-in, account creation, or linking routes are exposed in this phase.
+The repository supports one Google and one Apple identity per user; a provider
+subject belongs to only one user. Existing password accounts are not backfilled.
+
+Provider ID-token verification is disabled by default. Set
+`GOOGLE_AUTH_ENABLED=true` with comma-separated exact `GOOGLE_CLIENT_IDS`, or
+`APPLE_AUTH_ENABLED=true` with exact `APPLE_CLIENT_IDS`, to enable the respective
+verifier. The backend does not derive these IDs from bundle identifiers. Both
+verifiers check RS256 signatures using the providers' HTTPS JWKS endpoints, with
+a five-second fetch timeout, a 30-second key-refresh cooldown, and a ten-minute
+key cache. An unavailable provider/configuration returns
+`AUTH_PROVIDER_UNAVAILABLE`; invalid tokens return `AUTH_INVALID_PROVIDER_TOKEN`.
+These modules never log identity tokens. Phase 4A needs no Apple private key,
+Team ID, or Key ID because it does not exchange authorization codes.
+
+Apple verification requires an `expectedNonce` equal to the exact signed
+`nonce` claim. If the eventual client sends a SHA-256 nonce to Apple, the caller
+must pass that hashed value to the verifier. This phase does not issue, store,
+or consume nonce challenges; that binding belongs to the later sign-in flow.
+Google and Apple `sub` values are identity keys. Provider email is metadata and
+must not be used to auto-link a ChainBell account; Google's `email_verified`
+alone does not establish current ownership of every third-party email address.
+Apple email can be omitted or be a private relay address, and the first-login
+name is not a signed ID-token claim.
+
 ### Email verification and password recovery
 
 Phase 2 adds 6-digit, 10-minute email challenges. Migration 020 marked existing email accounts verified; migration 021 preserves access for older accounts without an email, which cannot receive a verification code. Accounts registered afterward start with `user.emailVerified: false`. Registration does not send a code automatically: the client calls the verification request endpoint when its code-entry screen is ready. An unverified token can access `/auth/me`, `/auth/logout`, and the verification request/verify routes, but normal protected application routes return `403 AUTH_EMAIL_VERIFICATION_REQUIRED`. After verification, the same token works on protected routes because each request loads current user state from PostgreSQL.

@@ -4,6 +4,15 @@ import { parseAllowedOrigins, parseProxyCidrs } from './network.js';
 
 dotenv.config();
 
+const authEnabledSchema = z.preprocess(
+  (value) => typeof value === 'boolean' ? String(value) : value,
+  z.enum(['true', 'false']).default('false')
+).transform((value) => value === 'true');
+
+const clientIdsSchema = z.string().default('').transform((value) =>
+  value.trim() === '' ? [] : value.split(',').map((id) => id.trim())
+);
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -28,6 +37,10 @@ const envSchema = z.object({
   DATABASE_MIGRATION_LOCK_TIMEOUT_MS: z.coerce.number().int().min(1).default(5_000),
   DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(1).default(300_000),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
+  GOOGLE_AUTH_ENABLED: authEnabledSchema,
+  GOOGLE_CLIENT_IDS: clientIdsSchema,
+  APPLE_AUTH_ENABLED: authEnabledSchema,
+  APPLE_CLIENT_IDS: clientIdsSchema,
   AUTH_EMAIL_DELIVERY_MODE: z.enum(['disabled', 'resend']).default('disabled'),
   RESEND_API_KEY: z.string().default(''),
   AUTH_EMAIL_FROM: z.string().default(''),
@@ -133,6 +146,25 @@ const envSchema = z.object({
   ETHEREUM_TRACE_TO_ADDRESS: z.string().optional(),
   ETHEREUM_TRACE_TX_HASH: z.string().optional()
 }).superRefine((config, context) => {
+  for (const provider of ['GOOGLE', 'APPLE']) {
+    const idsKey = `${provider}_CLIENT_IDS`;
+    const ids = config[idsKey];
+    if (ids.some((id) => !id || /\s/.test(id)) || new Set(ids).size !== ids.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [idsKey],
+        message: `${idsKey} must contain distinct, nonempty client IDs separated by commas`
+      });
+    }
+    if (config[`${provider}_AUTH_ENABLED`] && ids.length === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [idsKey],
+        message: `${idsKey} is required when ${provider}_AUTH_ENABLED is true`
+      });
+    }
+  }
+
   let proxyCidrs = [];
   try {
     proxyCidrs = parseProxyCidrs(config.TRUST_PROXY_CIDRS);

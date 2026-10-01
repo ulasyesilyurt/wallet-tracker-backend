@@ -22,11 +22,11 @@ function normalizeAddress(address) {
 }
 
 function getWalletSyncChains(wallet) {
-  if (Array.isArray(wallet?.enabledChains) && wallet.enabledChains.length > 0) {
-    return [...new Set(wallet.enabledChains)];
+  if (wallet?.status !== 'active' || !Array.isArray(wallet.enabledChains)) {
+    return [];
   }
 
-  return wallet?.chainId ? [wallet.chainId] : [];
+  return [...new Set(wallet.enabledChains)];
 }
 
 function getAlchemyAddressActivityWebhookId(chainId) {

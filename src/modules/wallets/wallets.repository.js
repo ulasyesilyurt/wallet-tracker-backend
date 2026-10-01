@@ -1,5 +1,7 @@
 import { pool } from '../../db/pool.js';
 import { query } from '../../db/query.js';
+import { SUPPORTED_CHAIN_IDS } from '../chains/chains.config.js';
+import { markAlchemyAddressPairsDirty } from '../webhooks/alchemyAddressReconciliation.repository.js';
 
 function normalizeTrackTypes(value) {
   if (Array.isArray(value)) {
@@ -16,7 +18,7 @@ function normalizeTrackTypes(value) {
   return [];
 }
 
-function normalizeEnabledChains(value, fallbackChainId = null) {
+function normalizeEnabledChains(value) {
   if (Array.isArray(value)) {
     const normalized = value.filter(Boolean);
 
@@ -36,7 +38,7 @@ function normalizeEnabledChains(value, fallbackChainId = null) {
     }
   }
 
-  return fallbackChainId ? [fallbackChainId] : [];
+  return [];
 }
 
 function mapWallet(row, enabledChainsOverride = null) {
@@ -50,7 +52,7 @@ function mapWallet(row, enabledChainsOverride = null) {
     label: row.label,
     status: row.status,
     trackTypes: normalizeTrackTypes(row.track_types),
-    enabledChains: enabledChainsOverride ?? normalizeEnabledChains(row.enabled_chains, chainId),
+    enabledChains: enabledChainsOverride ?? normalizeEnabledChains(row.enabled_chains),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -87,6 +89,32 @@ export async function listWalletChains(walletId) {
   );
 
   return result.rows.map((row) => row.chain_id).filter(Boolean);
+}
+
+async function listDesiredAlchemyPairsForWallet(client, walletId) {
+  const result = await client.query(
+    `
+      SELECT wc.chain_id, LOWER(tw.address) AS normalized_address
+      FROM tracked_wallets tw
+      INNER JOIN wallet_chains wc
+        ON wc.wallet_id = tw.id
+       AND wc.enabled = TRUE
+      WHERE tw.id = $1
+        AND tw.status = 'active'
+        AND wc.chain_id = ANY($2::text[])
+      ORDER BY wc.chain_id, LOWER(tw.address)
+    `,
+    [walletId, SUPPORTED_CHAIN_IDS]
+  );
+
+  return result.rows.map((row) => ({ chainId: row.chain_id, address: row.normalized_address }));
+}
+
+function desiredPairsChanged(previousPairs, nextPairs) {
+  const key = ({ chainId, address }) => `${chainId}:${address}`;
+  const previous = new Set(previousPairs.map(key));
+  const next = new Set(nextPairs.map(key));
+  return previous.size !== next.size || [...previous].some((pair) => !next.has(pair));
 }
 
 export async function findWalletAlertSettingsByWalletId(walletId) {
@@ -204,7 +232,7 @@ async function enrichWalletsWithEnabledChains(wallets) {
 
   return wallets.map((wallet) => ({
     ...wallet,
-    enabledChains: chainsByWalletId.get(wallet.id) ?? (wallet.chainId ? [wallet.chainId] : [])
+    enabledChains: chainsByWalletId.get(wallet.id) ?? []
   }));
 }
 
@@ -231,9 +259,11 @@ export async function createWalletWithPreferences({
     );
 
     const wallet = insertWalletResult.rows[0];
-    const normalizedEnabledChains = [...new Set(
-      enabledChains.length > 0 ? enabledChains : (chainId ? [chainId] : [])
-    )];
+    const normalizedEnabledChains = [...new Set(enabledChains)];
+
+    if (normalizedEnabledChains.length === 0) {
+      throw new TypeError('At least one enabled chain is required to create a tracked wallet');
+    }
 
     await upsertWalletChains(client, wallet.id, normalizedEnabledChains);
 
@@ -246,6 +276,8 @@ export async function createWalletWithPreferences({
         [wallet.id, trackType]
       );
     }
+
+    await markAlchemyAddressPairsDirty(client, await listDesiredAlchemyPairsForWallet(client, wallet.id));
 
     await client.query('COMMIT');
 
@@ -297,7 +329,7 @@ export async function findWalletByUserIdAndAddress(userId, address) {
 
   return {
     ...wallet,
-    enabledChains: enabledChains.length > 0 ? enabledChains : (wallet.chainId ? [wallet.chainId] : [])
+    enabledChains
   };
 }
 
@@ -339,6 +371,8 @@ export async function updateWalletById(walletId, userId, { address, label, track
       await client.query('ROLLBACK');
       return null;
     }
+
+    const previousDesiredPairs = await listDesiredAlchemyPairsForWallet(client, walletId);
 
     if (address !== undefined) {
       await client.query(
@@ -409,6 +443,12 @@ export async function updateWalletById(walletId, userId, { address, label, track
       await upsertWalletChains(client, walletId, enabledChains);
     }
 
+    const nextDesiredPairs = await listDesiredAlchemyPairsForWallet(client, walletId);
+
+    if (desiredPairsChanged(previousDesiredPairs, nextDesiredPairs)) {
+      await markAlchemyAddressPairsDirty(client, [...previousDesiredPairs, ...nextDesiredPairs]);
+    }
+
     await client.query('COMMIT');
 
     return findWalletById(walletId, userId);
@@ -454,7 +494,7 @@ export async function findWalletById(walletId, userId) {
 
   return {
     ...wallet,
-    enabledChains: enabledChains.length > 0 ? enabledChains : (wallet.chainId ? [wallet.chainId] : [])
+    enabledChains
   };
 }
 
@@ -492,7 +532,7 @@ export async function findWalletByIdOnly(walletId) {
 
   return {
     ...wallet,
-    enabledChains: enabledChains.length > 0 ? enabledChains : (wallet.chainId ? [wallet.chainId] : [])
+    enabledChains
   };
 }
 
@@ -628,20 +668,50 @@ export async function listActiveTrackedAddressesByChainId(chainId) {
 }
 
 export async function deleteWalletById(walletId, userId) {
-  const enabledChains = await listWalletChains(walletId);
-  const result = await query(
-    `
-      DELETE FROM tracked_wallets
-      WHERE id = $1 AND user_id = $2
-      RETURNING id, user_id, chain_id, address, label, status, created_at, updated_at
-    `,
-    [walletId, userId]
-  );
+  const client = await pool.connect();
 
-  return result.rows[0]
-    ? mapWallet(
-        { ...result.rows[0], track_types: [] },
-        enabledChains.length > 0 ? enabledChains : (result.rows[0].chain_id ? [result.rows[0].chain_id] : [])
-      )
-    : null;
+  try {
+    await client.query('BEGIN');
+
+    const existing = await client.query(
+      'SELECT id FROM tracked_wallets WHERE id = $1 AND user_id = $2 FOR UPDATE',
+      [walletId, userId]
+    );
+
+    if (existing.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    const enabledChainsResult = await client.query(
+      `
+        SELECT chain_id FROM wallet_chains
+        WHERE wallet_id = $1 AND enabled = TRUE
+        ORDER BY created_at ASC, chain_id ASC
+      `,
+      [walletId]
+    );
+    const desiredPairs = await listDesiredAlchemyPairsForWallet(client, walletId);
+    const result = await client.query(
+      `
+        DELETE FROM tracked_wallets
+        WHERE id = $1 AND user_id = $2
+        RETURNING id, user_id, chain_id, address, label, status, created_at, updated_at
+      `,
+      [walletId, userId]
+    );
+
+    await markAlchemyAddressPairsDirty(client, desiredPairs);
+    await client.query('COMMIT');
+
+    return mapWallet(
+      { ...result.rows[0], track_types: [] },
+      enabledChainsResult.rows.map((row) => row.chain_id)
+    );
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }

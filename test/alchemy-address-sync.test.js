@@ -62,9 +62,10 @@ function captureUpdates({ failFor = null, status = 503 } = {}) {
   return calls;
 }
 
-async function cleanupUser(userId) {
+async function cleanupUser(userId, address) {
   await query('DELETE FROM tracked_wallets WHERE user_id = $1', [userId]);
   await query('DELETE FROM app_users WHERE id = $1', [userId]);
+  await query('DELETE FROM alchemy_address_reconciliation WHERE normalized_address = $1', [address]);
 }
 
 for (const chainId of [ethereum, base]) {
@@ -107,7 +108,7 @@ test('wallet create keeps its API success shape when both chains sync', async ()
     assert.deepEqual(response.body.data.enabledChains, [base, ethereum]);
     assert.deepEqual(calls.map((call) => call.webhook_id).sort(), [webhookIds[ethereum], webhookIds[base]].sort());
   } finally {
-    await cleanupUser(userId);
+    await cleanupUser(userId, address);
   }
 });
 
@@ -132,7 +133,7 @@ for (const failedChain of [ethereum, base]) {
       assert.equal(persisted.rowCount, 1);
       assert.deepEqual(calls.map((call) => call.webhook_id).sort(), [webhookIds[ethereum], webhookIds[base]].sort());
     } finally {
-      await cleanupUser(userId);
+      await cleanupUser(userId, address);
     }
   });
 }
@@ -162,7 +163,7 @@ test('wallet update reports Base sync failure after persisting the chain change'
     const persisted = await query('SELECT chain_id FROM wallet_chains WHERE wallet_id = $1 AND enabled = TRUE', [created.body.data.id]);
     assert.deepEqual(persisted.rows.map((row) => row.chain_id).sort(), [ethereum, base].sort());
   } finally {
-    await cleanupUser(userId);
+    await cleanupUser(userId, address);
   }
 });
 
@@ -190,7 +191,7 @@ test('wallet delete reports sync failure after deleting the wallet', async () =>
     const persisted = await query('SELECT id FROM tracked_wallets WHERE id = $1', [created.body.data.id]);
     assert.equal(persisted.rowCount, 0);
   } finally {
-    await cleanupUser(userId);
+    await cleanupUser(userId, address);
   }
 });
 
@@ -200,8 +201,8 @@ test('wallet update adds new subscriptions and removes old addresses per chain',
   const nextAddress = randomAddress();
 
   await syncAlchemyWebhookAddressOnWalletUpdate(
-    { id: randomUUID(), address: previousAddress, enabledChains: [ethereum, base] },
-    { id: randomUUID(), address: nextAddress, enabledChains: [base] }
+    { id: randomUUID(), address: previousAddress, status: 'active', enabledChains: [ethereum, base] },
+    { id: randomUUID(), address: nextAddress, status: 'active', enabledChains: [base] }
   );
 
   assert.deepEqual(calls, [
@@ -228,7 +229,7 @@ test('removal rechecks the database and keeps addresses still used by a wallet',
     assert.equal(await removeAddressFromAlchemyWebhookSync({ chainId: ethereum, address }), false);
     assert.deepEqual(calls, []);
   } finally {
-    await cleanupUser(userId);
+    await cleanupUser(userId, address);
   }
 
   assert.equal(await removeAddressFromAlchemyWebhookSync({ chainId: ethereum, address }), true);

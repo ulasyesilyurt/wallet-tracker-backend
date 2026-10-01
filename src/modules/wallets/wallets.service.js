@@ -1,4 +1,3 @@
-import { query } from '../../db/query.js';
 import { HttpError } from '../../utils/httpError.js';
 import { logger } from '../../config/logger.js';
 import {
@@ -52,27 +51,7 @@ function toPublicWalletAlertSettings(settings) {
   };
 }
 
-export async function ensureUserExists(userId) {
-  const result = await query(
-    `
-      INSERT INTO app_users (id)
-      VALUES ($1)
-      ON CONFLICT (id) DO NOTHING
-      RETURNING id
-    `,
-    [userId]
-  );
-
-  if (result.rowCount > 0) {
-    return { id: userId, created: true };
-  }
-
-  return { id: userId, created: false };
-}
-
 export async function createWallet(payload) {
-  await ensureUserExists(payload.userId);
-
   const existingWallet = await findWalletByUserIdAndAddress(payload.userId, payload.address);
 
   if (existingWallet) {
@@ -117,6 +96,9 @@ export async function createWallet(payload) {
 
     return wallet;
   } catch (error) {
+    if (error.code === '23503' && error.constraint === 'tracked_wallets_user_id_fkey') {
+      throw new HttpError(401, 'AUTH_USER_NOT_FOUND', 'Authenticated user no longer exists.');
+    }
     if (error.code === '23505') {
       throw new HttpError(409, 'WALLET_ALREADY_TRACKED', 'This wallet is already being tracked for the user.');
     }

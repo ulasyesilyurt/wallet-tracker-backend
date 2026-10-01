@@ -19,9 +19,7 @@ const { createAccessToken } = await import('../src/utils/jwt.js');
 const {
   addAddressToAlchemyWebhookSync,
   listAlchemyWebhookWatchedAddresses,
-  removeAddressFromAlchemyWebhookSync,
-  syncAlchemyWebhookAddressOnWalletCreate,
-  syncAlchemyWebhookAddressOnWalletUpdate
+  removeAddressFromAlchemyWebhookSync
 } = await import('../src/modules/webhooks/alchemyAddressSync.service.js');
 const { reconcileAlchemyWebhookAddresses } = await import('../src/modules/webhooks/alchemyReconciliation.service.js');
 
@@ -90,7 +88,7 @@ for (const chainId of [ethereum, base]) {
   });
 }
 
-test('wallet create keeps its API success shape when both chains sync', async () => {
+test('wallet create keeps its API success shape and queues both chains', async () => {
   const calls = captureUpdates();
   const userId = randomUUID();
   const token = await createAccessToken({ id: userId });
@@ -106,14 +104,16 @@ test('wallet create keeps its API success shape when both chains sync', async ()
     assert.equal(response.status, 201);
     assert.equal(response.body.data.address, address);
     assert.deepEqual(response.body.data.enabledChains, [base, ethereum]);
-    assert.deepEqual(calls.map((call) => call.webhook_id).sort(), [webhookIds[ethereum], webhookIds[base]].sort());
+    assert.deepEqual(calls, []);
+    const pending = await query('SELECT chain_id FROM alchemy_address_reconciliation WHERE normalized_address = $1', [address]);
+    assert.deepEqual(pending.rows.map((row) => row.chain_id).sort(), [ethereum, base].sort());
   } finally {
     await cleanupUser(userId, address);
   }
 });
 
 for (const failedChain of [ethereum, base]) {
-  test(`${failedChain} sync failure returns an explicit error after wallet persistence`, async () => {
+  test(`${failedChain} provider unavailability does not change wallet create response`, async () => {
     const calls = captureUpdates({ failFor: webhookIds[failedChain] });
     const userId = randomUUID();
     const token = await createAccessToken({ id: userId });
@@ -126,19 +126,17 @@ for (const failedChain of [ethereum, base]) {
         .set('Authorization', `Bearer ${token}`)
         .send({ address, enabledChains: [ethereum, base], trackTypes: ['native_transfer'] });
 
-      assert.equal(response.status, 503);
-      assert.equal(response.body.error.code, 'ALCHEMY_WEBHOOK_SYNC_FAILED');
-      assert.match(response.body.error.message, /saved/);
+      assert.equal(response.status, 201);
       const persisted = await query('SELECT id FROM tracked_wallets WHERE user_id = $1 AND address = $2', [userId, address]);
       assert.equal(persisted.rowCount, 1);
-      assert.deepEqual(calls.map((call) => call.webhook_id).sort(), [webhookIds[ethereum], webhookIds[base]].sort());
+      assert.deepEqual(calls, []);
     } finally {
       await cleanupUser(userId, address);
     }
   });
 }
 
-test('wallet update reports Base sync failure after persisting the chain change', async () => {
+test('wallet update queues Base without calling its unavailable provider', async () => {
   captureUpdates();
   const userId = randomUUID();
   const token = await createAccessToken({ id: userId });
@@ -158,8 +156,7 @@ test('wallet update reports Base sync failure after persisting the chain change'
       .set('Authorization', `Bearer ${token}`)
       .send({ enabledChains: [ethereum, base] });
 
-    assert.equal(response.status, 503);
-    assert.equal(response.body.error.code, 'ALCHEMY_WEBHOOK_SYNC_FAILED');
+    assert.equal(response.status, 200);
     const persisted = await query('SELECT chain_id FROM wallet_chains WHERE wallet_id = $1 AND enabled = TRUE', [created.body.data.id]);
     assert.deepEqual(persisted.rows.map((row) => row.chain_id).sort(), [ethereum, base].sort());
   } finally {
@@ -167,7 +164,7 @@ test('wallet update reports Base sync failure after persisting the chain change'
   }
 });
 
-test('wallet delete reports sync failure after deleting the wallet', async () => {
+test('wallet delete queues cleanup without calling its unavailable provider', async () => {
   captureUpdates();
   const userId = randomUUID();
   const token = await createAccessToken({ id: userId });
@@ -186,30 +183,12 @@ test('wallet delete reports sync failure after deleting the wallet', async () =>
       .delete(`/api/v1/users/${userId}/wallets/${created.body.data.id}`)
       .set('Authorization', `Bearer ${token}`);
 
-    assert.equal(response.status, 503);
-    assert.equal(response.body.error.code, 'ALCHEMY_WEBHOOK_SYNC_FAILED');
+    assert.equal(response.status, 200);
     const persisted = await query('SELECT id FROM tracked_wallets WHERE id = $1', [created.body.data.id]);
     assert.equal(persisted.rowCount, 0);
   } finally {
     await cleanupUser(userId, address);
   }
-});
-
-test('wallet update adds new subscriptions and removes old addresses per chain', async () => {
-  const calls = captureUpdates();
-  const previousAddress = randomAddress();
-  const nextAddress = randomAddress();
-
-  await syncAlchemyWebhookAddressOnWalletUpdate(
-    { id: randomUUID(), address: previousAddress, status: 'active', enabledChains: [ethereum, base] },
-    { id: randomUUID(), address: nextAddress, status: 'active', enabledChains: [base] }
-  );
-
-  assert.deepEqual(calls, [
-    { webhook_id: webhookIds[base], addresses_to_add: [nextAddress], addresses_to_remove: [] },
-    { webhook_id: webhookIds[ethereum], addresses_to_add: [], addresses_to_remove: [previousAddress] },
-    { webhook_id: webhookIds[base], addresses_to_add: [], addresses_to_remove: [previousAddress] }
-  ]);
 });
 
 test('removal rechecks the database and keeps addresses still used by a wallet', async () => {
@@ -303,58 +282,48 @@ test('watched-address listing stops at its finite page and item limits', async (
   assert.equal(calls, 1);
 });
 
-test('reconciliation adds missing addresses on each chain and is idempotent', async () => {
+test('full reconciliation queues missing addresses on each chain', async () => {
   const ethereumAddress = randomAddress();
   const baseAddress = randomAddress();
   const expected = { [ethereum]: [ethereumAddress], [base]: [baseAddress] };
-  const watched = { [ethereum]: new Set(), [base]: new Set() };
   const calls = [];
   const options = {
     listDbAddresses: async (chainId) => expected[chainId],
-    listWatchedAddresses: async (chainId) => [...watched[chainId]],
-    addAddress: async ({ chainId, address }) => {
-      calls.push({ chainId, address });
-      watched[chainId].add(address);
-      return true;
-    },
-    removeAddress: async () => { throw new Error('No removal expected'); }
+    listWatchedAddresses: async () => [],
+    enqueuePairs: async (pairs) => { calls.push(pairs); }
   };
 
   const first = await reconcileAlchemyWebhookAddresses(options);
-  assert.deepEqual(first.map((report) => report.addedCount), [1, 1]);
+  assert.deepEqual(first.map((report) => report.queuedCount), [1, 1]);
   assert.deepEqual(calls, [
-    { chainId: ethereum, address: ethereumAddress },
-    { chainId: base, address: baseAddress }
+    [{ chainId: ethereum, address: ethereumAddress }],
+    [{ chainId: base, address: baseAddress }]
   ]);
 
-  const second = await reconcileAlchemyWebhookAddresses(options);
-  assert.deepEqual(second.map((report) => report.addedCount), [0, 0]);
+  const dryRun = await reconcileAlchemyWebhookAddresses({ ...options, dryRun: true });
+  assert.deepEqual(dryRun.map((report) => report.queuedCount), [0, 0]);
   assert.equal(calls.length, 2);
 });
 
-test('reconciliation removes stale addresses only from their own chain', async () => {
+test('full reconciliation queues stale addresses only on their own chain', async () => {
   const ethereumAddress = randomAddress();
   const baseAddress = randomAddress();
   const staleEthereum = randomAddress();
   const staleBase = randomAddress();
   const watched = { [ethereum]: [ethereumAddress, staleEthereum], [base]: [baseAddress, staleBase] };
-  const removed = [];
+  const queued = [];
 
   const reports = await reconcileAlchemyWebhookAddresses({
     listDbAddresses: async (chainId) => chainId === ethereum ? [ethereumAddress] : [baseAddress],
     listWatchedAddresses: async (chainId) => watched[chainId],
-    addAddress: async () => { throw new Error('No add expected'); },
-    removeAddress: async ({ chainId, address }) => {
-      removed.push({ chainId, address });
-      return true;
-    }
+    enqueuePairs: async (pairs) => { queued.push(pairs); }
   });
 
-  assert.deepEqual(removed, [
-    { chainId: ethereum, address: staleEthereum },
-    { chainId: base, address: staleBase }
+  assert.deepEqual(queued, [
+    [{ chainId: ethereum, address: staleEthereum }],
+    [{ chainId: base, address: staleBase }]
   ]);
-  assert.deepEqual(reports.map((report) => report.removedCount), [1, 1]);
+  assert.deepEqual(reports.map((report) => report.queuedCount), [1, 1]);
 });
 
 test('management request times out and propagates failure', async () => {

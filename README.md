@@ -323,28 +323,26 @@ Unsigned production webhook requests are rejected.
 
 ## Alchemy Wallet Reconciliation
 
-Wallet database changes are persisted before Alchemy watched-address synchronization.
+Wallet create, update, and delete commit chain/address reconciliation markers with the wallet change.
+The background worker reads current PostgreSQL desired state, checks the corresponding Alchemy webhook,
+and adds or removes an address only when needed. Provider failure does not change the wallet API response;
+the marker is retried with backoff. The worker starts with the API process and does not block HTTP startup.
 
-If Alchemy synchronization fails, the wallet change remains saved and the API reports:
-
-```txt
-ALCHEMY_WEBHOOK_SYNC_FAILED
-```
-
-Use reconciliation to repair provider state:
+Use the full drift sweep to enqueue differences caused outside wallet mutations:
 
 ```bash
 npm run reconcile:alchemy-webhook-addresses -- --dry-run
 npm run reconcile:alchemy-webhook-addresses
 ```
 
-The reconciliation process:
+The drift sweep:
 
 - Reads current watched addresses
-- Adds missing database addresses
-- Removes stale provider addresses when safe
+- Queues missing database addresses and stale provider addresses for the same worker
 - Handles Ethereum and Base independently
-- Stops a chain reconciliation if provider pagination is incomplete or fails
+- Stops a chain sweep if provider pagination is incomplete or fails
+
+The full drift sweep is manual in this phase; periodic worker polling processes queued markers.
 
 ## Local Development
 

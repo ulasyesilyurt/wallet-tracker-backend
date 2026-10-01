@@ -21,14 +21,6 @@ function normalizeAddress(address) {
   return typeof address === 'string' ? address.trim().toLowerCase() : '';
 }
 
-function getWalletSyncChains(wallet) {
-  if (wallet?.status !== 'active' || !Array.isArray(wallet.enabledChains)) {
-    return [];
-  }
-
-  return [...new Set(wallet.enabledChains)];
-}
-
 function getAlchemyAddressActivityWebhookId(chainId) {
   const chainConfig = getChainConfigById(chainId);
 
@@ -74,7 +66,12 @@ function ensureAlchemyWebhookSyncConfigured(chainId) {
   return webhookId;
 }
 
-async function updateAlchemyWebhookAddresses({ chainId, addressesToAdd = [], addressesToRemove = [] }) {
+function providerSignal(signal) {
+  const timeout = AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS);
+  return signal ? AbortSignal.any([timeout, signal]) : timeout;
+}
+
+async function updateAlchemyWebhookAddresses({ chainId, addressesToAdd = [], addressesToRemove = [], signal }) {
   const webhookId = ensureAlchemyWebhookSyncConfigured(chainId);
 
   let response;
@@ -87,7 +84,7 @@ async function updateAlchemyWebhookAddresses({ chainId, addressesToAdd = [], add
         addresses_to_add: addressesToAdd,
         addresses_to_remove: addressesToRemove
       }),
-      signal: AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS)
+      signal: providerSignal(signal)
     });
   } catch (error) {
     alchemyAddressSyncLogger.warn(
@@ -166,7 +163,7 @@ async function loadWatchedAddressesOverride() {
   return null;
 }
 
-export async function listAlchemyWebhookWatchedAddresses(chainId = ETHEREUM_MAINNET_CHAIN_ID, { allowOverride = false } = {}) {
+export async function listAlchemyWebhookWatchedAddresses(chainId = ETHEREUM_MAINNET_CHAIN_ID, { allowOverride = false, signal } = {}) {
   const webhookId = ensureAlchemyWebhookSyncConfigured(chainId);
 
   if (allowOverride && chainId === ETHEREUM_MAINNET_CHAIN_ID) {
@@ -185,6 +182,7 @@ export async function listAlchemyWebhookWatchedAddresses(chainId = ETHEREUM_MAIN
   const maxItems = WEBHOOK_ADDRESS_MAX_PAGES * WEBHOOK_ADDRESS_PAGE_SIZE;
 
   do {
+    signal?.throwIfAborted();
     if (fetchedPages >= WEBHOOK_ADDRESS_MAX_PAGES) {
       const error = new Error('Alchemy webhook address list exceeded the page limit; refusing reconciliation');
       error.code = 'PROVIDER_PAGE_LIMIT';
@@ -210,7 +208,7 @@ export async function listAlchemyWebhookWatchedAddresses(chainId = ETHEREUM_MAIN
       response = await fetch(url, {
         method: 'GET',
         headers: buildAlchemyHeaders(),
-        signal: AbortSignal.timeout(env.ALCHEMY_NOTIFY_REQUEST_TIMEOUT_MS)
+        signal: providerSignal(signal)
       });
     } catch (error) {
       alchemyAddressSyncLogger.warn(
@@ -300,7 +298,7 @@ export async function listAlchemyWebhookWatchedAddresses(chainId = ETHEREUM_MAIN
   return [...addresses].sort();
 }
 
-async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }) {
+async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason, signal }) {
   const normalizedAddress = normalizeAddress(address);
   const chainConfig = getChainConfigById(chainId);
 
@@ -322,7 +320,8 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
   try {
     await updateAlchemyWebhookAddresses({
       chainId,
-      addressesToAdd: [normalizedAddress]
+      addressesToAdd: [normalizedAddress],
+      signal
     });
 
     alchemyAddressSyncLogger.info(
@@ -344,7 +343,7 @@ async function addAddressToAlchemyWebhook({ chainId, address, walletId, reason }
   }
 }
 
-async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walletId, reason }) {
+async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walletId, reason, signal }) {
   const normalizedAddress = normalizeAddress(address);
   const chainConfig = getChainConfigById(chainId);
 
@@ -381,7 +380,8 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
   try {
     await updateAlchemyWebhookAddresses({
       chainId,
-      addressesToRemove: [normalizedAddress]
+      addressesToRemove: [normalizedAddress],
+      signal
     });
 
     alchemyAddressSyncLogger.info(
@@ -403,98 +403,20 @@ async function removeAddressFromAlchemyWebhookIfUnused({ chainId, address, walle
   }
 }
 
-async function runSyncSteps(steps) {
-  const failures = [];
-
-  for (const step of steps) {
-    try {
-      await step();
-    } catch (error) {
-      failures.push(error);
-    }
-  }
-
-  if (failures.length > 0) {
-    throw new AggregateError(failures, 'One or more Alchemy webhook address updates failed');
-  }
+export async function addAddressToAlchemyWebhookSync({ chainId, address, reason = 'manual_sync', walletId = null, signal }) {
+  return addAddressToAlchemyWebhook({ chainId, address, reason, walletId, signal });
 }
 
-export async function syncAlchemyWebhookAddressOnWalletCreate(wallet) {
-  await runSyncSteps(getWalletSyncChains(wallet).map((chainId) => () =>
-    addAddressToAlchemyWebhook({
-      chainId,
-      address: wallet.address,
-      walletId: wallet.id,
-      reason: 'wallet_created'
-    })
-  ));
+export async function removeAddressFromAlchemyWebhookSync({ chainId, address, reason = 'manual_sync', walletId = null, signal }) {
+  return removeAddressFromAlchemyWebhookIfUnused({ chainId, address, reason, walletId, signal });
 }
 
-export async function syncAlchemyWebhookAddressOnWalletDelete(wallet) {
-  await runSyncSteps(getWalletSyncChains(wallet).map((chainId) => () =>
-    removeAddressFromAlchemyWebhookIfUnused({
-      chainId,
-      address: wallet.address,
-      walletId: wallet.id,
-      reason: 'wallet_deleted'
-    })
-  ));
-}
-
-export async function syncAlchemyWebhookAddressOnWalletUpdate(previousWallet, updatedWallet) {
-  const previousAddress = normalizeAddress(previousWallet?.address);
-  const nextAddress = normalizeAddress(updatedWallet?.address);
-  const previousChains = getWalletSyncChains(previousWallet);
-  const nextChains = getWalletSyncChains(updatedWallet);
-
-  if (!previousWallet || !updatedWallet) {
-    return;
-  }
-
-  const addressChanged = previousAddress !== nextAddress;
-  const chainsAdded = nextChains.filter((chainId) => !previousChains.includes(chainId));
-  const chainsRemoved = previousChains.filter((chainId) => !nextChains.includes(chainId));
-
-  if (!addressChanged && chainsAdded.length === 0 && chainsRemoved.length === 0) {
-    alchemyAddressSyncLogger.info(
-      {
-        walletId: updatedWallet?.id ?? previousWallet?.id ?? null,
-        previousChains,
-        nextChains
-      },
-      'Alchemy webhook address sync update skipped because wallet address and enabled chains did not change'
-    );
-    return;
-  }
-
-  const chainsToAdd = addressChanged ? nextChains : chainsAdded;
-
-  const addSteps = chainsToAdd.map((chainId) => () =>
-    addAddressToAlchemyWebhook({
-      chainId,
-      address: updatedWallet.address,
-      walletId: updatedWallet.id,
-      reason: addressChanged ? 'wallet_address_updated_add_new' : 'wallet_chain_enabled'
-    })
-  );
-
-  const chainsToRemove = addressChanged ? previousChains : chainsRemoved;
-  const removeSteps = chainsToRemove.map((chainId) => () =>
-    removeAddressFromAlchemyWebhookIfUnused({
-      chainId,
-      address: previousWallet.address,
-      walletId: updatedWallet.id,
-      reason: addressChanged ? 'wallet_address_updated_remove_old' : 'wallet_chain_disabled'
-    })
-  );
-
-  await runSyncSteps([...addSteps, ...removeSteps]);
-}
-
-export async function addAddressToAlchemyWebhookSync({ chainId, address, reason = 'manual_sync', walletId = null }) {
-  return addAddressToAlchemyWebhook({ chainId, address, reason, walletId });
-}
-
-export async function removeAddressFromAlchemyWebhookSync({ chainId, address, reason = 'manual_sync', walletId = null }) {
-  return removeAddressFromAlchemyWebhookIfUnused({ chainId, address, reason, walletId });
+// The reconciliation worker already checked current desired state while holding
+// the pair advisory lock, so it must not acquire a second pool client here.
+export async function removeAddressFromAlchemyWebhookAfterDesiredCheck({ chainId, address, signal }) {
+  await updateAlchemyWebhookAddresses({
+    chainId,
+    addressesToRemove: [normalizeAddress(address)],
+    signal
+  });
 }

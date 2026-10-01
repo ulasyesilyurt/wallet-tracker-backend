@@ -15,7 +15,6 @@ const {
   updateWalletById
 } = await import('../src/modules/wallets/wallets.repository.js');
 const { markAlchemyAddressPairsDirty } = await import('../src/modules/webhooks/alchemyAddressReconciliation.repository.js');
-const { syncAlchemyWebhookAddressOnWalletCreate } = await import('../src/modules/webhooks/alchemyAddressSync.service.js');
 
 const ethereum = 'ethereum-mainnet';
 const base = 'base-mainnet';
@@ -205,7 +204,7 @@ test('shared addresses keep one marker and repeated marks advance generation', a
   )).rows[0].due, true);
 });
 
-test('no wallet_chains row means no desired watch or immediate sync fallback', async () => {
+test('no wallet_chains row means no desired watch or enabled-chain fallback', async () => {
   const userId = await user();
   const walletAddress = address();
   const walletId = randomUUID();
@@ -217,9 +216,5 @@ test('no wallet_chains row means no desired watch or immediate sync fallback', a
   const wallet = await findWalletById(walletId, userId);
   assert.deepEqual(wallet.enabledChains, []);
   assert.equal(await countActiveWalletsByChainIdAndAddress(ethereum, walletAddress), 0);
-  let calls = 0;
-  global.fetch = async () => { calls += 1; throw new Error('Unexpected Alchemy call'); };
-  await syncAlchemyWebhookAddressOnWalletCreate(wallet);
-  assert.equal(calls, 0);
   assert.deepEqual(await markers(walletAddress), []);
 });

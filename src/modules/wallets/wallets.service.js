@@ -1,5 +1,4 @@
 import { HttpError } from '../../utils/httpError.js';
-import { logger } from '../../config/logger.js';
 import {
   createWalletWithPreferences,
   deleteWalletById,
@@ -10,34 +9,7 @@ import {
   upsertWalletAlertSettings,
   updateWalletById
 } from './wallets.repository.js';
-import {
-  syncAlchemyWebhookAddressOnWalletCreate,
-  syncAlchemyWebhookAddressOnWalletDelete,
-  syncAlchemyWebhookAddressOnWalletUpdate
-} from '../webhooks/alchemyAddressSync.service.js';
 import { applyWalletAlertSettingsDefaults } from '../notifications/notificationRules.service.js';
-import { safeErrorDetails } from '../../utils/safeError.js';
-import {
-  recordAlchemySyncFailure,
-  recordAlchemySyncSuccess
-} from '../operations/operationalState.js';
-
-const walletsServiceLogger = logger.child({ module: 'wallets-service' });
-
-function reportAlchemySyncFailure(error, context, message) {
-  recordAlchemySyncFailure(error);
-  walletsServiceLogger.error({
-    provider: 'alchemy',
-    operation: 'wallet_subscription_sync',
-    ...safeErrorDetails(error),
-    ...context
-  }, message);
-  throw new HttpError(
-    503,
-    'ALCHEMY_WEBHOOK_SYNC_FAILED',
-    'Wallet change was saved, but real-time tracking could not be updated. Subscription reconciliation is required.'
-  );
-}
 
 function toPublicWalletAlertSettings(settings) {
   return {
@@ -66,35 +38,11 @@ export async function createWallet(payload) {
       throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
     }
 
-    try {
-      await syncAlchemyWebhookAddressOnWalletUpdate(existingWallet, updatedExistingWallet);
-      recordAlchemySyncSuccess();
-    } catch (error) {
-      reportAlchemySyncFailure(error, {
-        walletId: updatedExistingWallet.id,
-        previousEnabledChains: existingWallet.enabledChains,
-        nextEnabledChains: updatedExistingWallet.enabledChains
-      }, 'Alchemy webhook sync failed after address-centric wallet merge');
-    }
-
     return updatedExistingWallet;
   }
 
   try {
-    const wallet = await createWalletWithPreferences(payload);
-
-    try {
-      await syncAlchemyWebhookAddressOnWalletCreate(wallet);
-      recordAlchemySyncSuccess();
-    } catch (error) {
-      reportAlchemySyncFailure(
-        error,
-        { walletId: wallet.id, chainId: wallet.chainId },
-        'Alchemy webhook sync failed after wallet create'
-      );
-    }
-
-    return wallet;
+    return await createWalletWithPreferences(payload);
   } catch (error) {
     if (error.code === '23503' && error.constraint === 'tracked_wallets_user_id_fkey') {
       throw new HttpError(401, 'AUTH_USER_NOT_FOUND', 'Authenticated user no longer exists.');
@@ -132,17 +80,6 @@ export async function removeWallet(walletId, userId) {
     });
   }
 
-  try {
-    await syncAlchemyWebhookAddressOnWalletDelete(existingWallet);
-    recordAlchemySyncSuccess();
-  } catch (error) {
-    reportAlchemySyncFailure(
-      error,
-      { walletId: existingWallet.id, enabledChains: existingWallet.enabledChains },
-      'Alchemy webhook sync failed after wallet delete'
-    );
-  }
-
   return deletedWallet;
 }
 
@@ -157,19 +94,6 @@ export async function updateWallet(walletId, userId, payload) {
 
   if (!updatedWallet) {
     throw new HttpError(404, 'WALLET_NOT_FOUND', 'Tracked wallet not found.');
-  }
-
-  if (payload.address !== undefined || payload.enabledChains !== undefined) {
-    try {
-      await syncAlchemyWebhookAddressOnWalletUpdate(existingWallet, updatedWallet);
-      recordAlchemySyncSuccess();
-    } catch (error) {
-      reportAlchemySyncFailure(error, {
-        walletId: updatedWallet.id,
-        previousEnabledChains: existingWallet.enabledChains,
-        nextEnabledChains: updatedWallet.enabledChains
-      }, 'Alchemy webhook sync failed after wallet update');
-    }
   }
 
   return updatedWallet;

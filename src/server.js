@@ -7,6 +7,7 @@ import { checkDatabaseReadiness } from './db/readiness.js';
 import { EthereumWalletActivityTracker } from './modules/ethereum/ethereum.tracker.js';
 import { BASE_MAINNET_CHAIN_ID, ETHEREUM_MAINNET_CHAIN_ID } from './modules/chains/chains.config.js';
 import { getAlchemyAddressActivityWebhookIdForChain } from './modules/webhooks/alchemyAddressSync.service.js';
+import { AlchemyAddressReconciliationWorker } from './modules/webhooks/alchemyAddressReconciliation.worker.js';
 import { PortfolioSnapshotJob } from './modules/performance/performance.job.js';
 import { NotificationOutboxWorker } from './modules/notifications/notificationOutbox.worker.js';
 import { buildOperationalStatus } from './modules/operations/operations.service.js';
@@ -21,6 +22,7 @@ const portfolioSnapshotJob = env.ENABLE_PORTFOLIO_SNAPSHOT_JOB
   ? new PortfolioSnapshotJob({ intervalMs: env.PORTFOLIO_SNAPSHOT_INTERVAL_MS })
   : null;
 const notificationOutboxWorker = new NotificationOutboxWorker();
+const alchemyAddressReconciliationWorker = new AlchemyAddressReconciliationWorker();
 let shuttingDown = false;
 let shutdownPromise = null;
 let server = null;
@@ -56,7 +58,8 @@ function logListening() {
       webhookEndpoint: '/api/v1/webhooks/alchemy',
       pollingTrackerEnabled: Boolean(ethereumTracker),
       portfolioSnapshotJobEnabled: Boolean(portfolioSnapshotJob),
-      notificationOutboxWorkerEnabled: true
+      notificationOutboxWorkerEnabled: true,
+      alchemyAddressReconciliationWorkerEnabled: true
     },
     'Wallet tracker backend is running'
   );
@@ -149,7 +152,8 @@ function shutdown(signal, exitCode = 0) {
       httpClosed,
       ethereumTracker?.stop(),
       portfolioSnapshotJob?.stop(),
-      notificationOutboxWorker.stop()
+      notificationOutboxWorker.stop(),
+      alchemyAddressReconciliationWorker.stop()
     ]);
     await pool.end();
     clearTimeout(deadline);
@@ -196,6 +200,7 @@ async function start() {
     logger.error(safeErrorDetails(error), 'Notification outbox worker did not start');
     void shutdown('NOTIFICATION_WORKER_START_FAILURE', 1);
   });
+  alchemyAddressReconciliationWorker.start();
 
   if (ethereumTracker) {
     ethereumTracker.start().catch((error) => {

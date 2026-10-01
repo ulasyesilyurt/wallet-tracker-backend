@@ -1,7 +1,10 @@
 import { pool } from '../../db/pool.js';
 import { query } from '../../db/query.js';
 import { SUPPORTED_CHAIN_IDS } from '../chains/chains.config.js';
-import { markAlchemyAddressPairsDirty } from '../webhooks/alchemyAddressReconciliation.repository.js';
+import {
+  lockAlchemyAddressPairsForMutation,
+  markAlchemyAddressPairsDirty
+} from '../webhooks/alchemyAddressReconciliation.repository.js';
 
 function normalizeTrackTypes(value) {
   if (Array.isArray(value)) {
@@ -249,6 +252,19 @@ export async function createWalletWithPreferences({
   try {
     await client.query('BEGIN');
 
+    await client.query('SELECT id FROM app_users WHERE id = $1 FOR UPDATE', [userId]);
+
+    const normalizedEnabledChains = [...new Set(enabledChains)];
+
+    if (normalizedEnabledChains.length === 0) {
+      throw new TypeError('At least one enabled chain is required to create a tracked wallet');
+    }
+
+    await lockAlchemyAddressPairsForMutation(client, normalizedEnabledChains.map((enabledChainId) => ({
+      chainId: enabledChainId,
+      address
+    })));
+
     const insertWalletResult = await client.query(
       `
         INSERT INTO tracked_wallets (user_id, chain_id, address, label)
@@ -259,12 +275,6 @@ export async function createWalletWithPreferences({
     );
 
     const wallet = insertWalletResult.rows[0];
-    const normalizedEnabledChains = [...new Set(enabledChains)];
-
-    if (normalizedEnabledChains.length === 0) {
-      throw new TypeError('At least one enabled chain is required to create a tracked wallet');
-    }
-
     await upsertWalletChains(client, wallet.id, normalizedEnabledChains);
 
     for (const trackType of trackTypes) {
@@ -357,9 +367,11 @@ export async function updateWalletById(walletId, userId, { address, label, track
   try {
     await client.query('BEGIN');
 
+    await client.query('SELECT id FROM app_users WHERE id = $1 FOR UPDATE', [userId]);
+
     const existingWalletResult = await client.query(
       `
-        SELECT id
+        SELECT id, address, status
         FROM tracked_wallets
         WHERE id = $1 AND user_id = $2
         FOR UPDATE
@@ -373,6 +385,17 @@ export async function updateWalletById(walletId, userId, { address, label, track
     }
 
     const previousDesiredPairs = await listDesiredAlchemyPairsForWallet(client, walletId);
+    const existingWallet = existingWalletResult.rows[0];
+    const nextDesiredPairsBeforeMutation = existingWallet.status === 'active'
+      ? (enabledChains ?? previousDesiredPairs.map((pair) => pair.chainId)).map((enabledChainId) => ({
+          chainId: enabledChainId,
+          address: address ?? existingWallet.address
+        }))
+      : [];
+    await lockAlchemyAddressPairsForMutation(client, [
+      ...previousDesiredPairs,
+      ...nextDesiredPairsBeforeMutation
+    ]);
 
     if (address !== undefined) {
       await client.query(
@@ -673,6 +696,8 @@ export async function deleteWalletById(walletId, userId) {
   try {
     await client.query('BEGIN');
 
+    await client.query('SELECT id FROM app_users WHERE id = $1 FOR UPDATE', [userId]);
+
     const existing = await client.query(
       'SELECT id FROM tracked_wallets WHERE id = $1 AND user_id = $2 FOR UPDATE',
       [walletId, userId]
@@ -692,6 +717,7 @@ export async function deleteWalletById(walletId, userId) {
       [walletId]
     );
     const desiredPairs = await listDesiredAlchemyPairsForWallet(client, walletId);
+    await lockAlchemyAddressPairsForMutation(client, desiredPairs);
     const result = await client.query(
       `
         DELETE FROM tracked_wallets

@@ -2,9 +2,15 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { HttpError } from '../../utils/httpError.js';
 import { verifyPassword } from '../../utils/password.js';
 import { verifyAppleIdToken } from './apple.verifier.js';
+import { env } from '../../config/env.js';
 import {
-  completeAccountDeletionReauth, issueAccountDeletionChallenge,
-  readAccountDeletionChallenge, recordFailedAccountDeletionProof
+  exchangeGoogleAuthorizationCode, googleDeletionOAuthConfigIsComplete,
+  verifyGoogleDeletionIdToken
+} from './googleDeletionOAuth.js';
+import {
+  claimGoogleDeletionCallback, completeAccountDeletionReauth, completeGoogleDeletionCallback,
+  failGoogleDeletionCallback, issueAccountDeletionChallenge, readAccountDeletionChallenge,
+  recordFailedAccountDeletionProof
 } from './accountDeletionReauth.repository.js';
 
 function managedSessionId(auth) {
@@ -32,22 +38,51 @@ function sha256(value) {
 
 export function createAccountDeletionReauth({
   appleVerifier = verifyAppleIdToken,
-  passwordVerifier = verifyPassword
+  passwordVerifier = verifyPassword,
+  googleOAuthConfig = env,
+  googleCodeExchange = exchangeGoogleAuthorizationCode,
+  googleTokenVerifier = verifyGoogleDeletionIdToken
 } = {}) {
   return {
     async challenge(auth, { method }) {
       const sessionId = managedSessionId(auth);
-      if (method === 'google') throw methodUnavailable();
+      if (method === 'google' && !googleDeletionOAuthConfigIsComplete(googleOAuthConfig)) {
+        throw methodUnavailable();
+      }
 
-      const nonce = method === 'apple' ? randomBytes(32).toString('hex') : null;
+      const nonce = method === 'apple' ? randomBytes(32).toString('hex')
+        : method === 'google' ? randomBytes(32).toString('base64url') : null;
+      const state = method === 'google' ? randomBytes(32).toString('base64url') : null;
+      const codeVerifier = method === 'google' ? randomBytes(32).toString('base64url') : null;
       const id = randomUUID();
       const stored = await issueAccountDeletionChallenge({
         id,
         userId: auth.user.id,
         sessionId,
         method,
-        nonceDigest: nonce ? sha256(nonce) : null
+        nonceDigest: nonce ? sha256(nonce) : null,
+        googleOAuth: method === 'google' ? {
+          stateDigest: sha256(state), codeVerifier,
+          clientId: googleOAuthConfig.GOOGLE_DELETION_OAUTH_CLIENT_ID,
+          redirectUri: googleOAuthConfig.GOOGLE_DELETION_OAUTH_REDIRECT_URI
+        } : null
       });
+      if (method === 'google') {
+        const authorizationUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+        authorizationUrl.search = new URLSearchParams({
+          response_type: 'code',
+          client_id: googleOAuthConfig.GOOGLE_DELETION_OAUTH_CLIENT_ID,
+          redirect_uri: googleOAuthConfig.GOOGLE_DELETION_OAUTH_REDIRECT_URI,
+          scope: 'openid email',
+          state,
+          nonce,
+          code_challenge: sha256(codeVerifier).toString('base64url'),
+          code_challenge_method: 'S256',
+          prompt: 'select_account'
+        }).toString();
+        return { challengeId: id, method, expiresAt: stored.expires_at.toISOString(),
+          authorizationUrl: authorizationUrl.toString() };
+      }
       return {
         challengeId: id,
         method,
@@ -58,7 +93,9 @@ export function createAccountDeletionReauth({
 
     async verify(auth, request) {
       const sessionId = managedSessionId(auth);
-      if (request.method === 'google') throw methodUnavailable();
+      if (request.method === 'google' && !googleDeletionOAuthConfigIsComplete(googleOAuthConfig)) {
+        throw methodUnavailable();
+      }
       const context = {
         id: request.challengeId,
         userId: auth.user.id,
@@ -84,7 +121,7 @@ export function createAccountDeletionReauth({
           await recordFailedAccountDeletionProof(context);
           throw reauthFailed();
         }
-      } else {
+      } else if (request.method === 'apple') {
         expectedNonceDigest = challenge.nonce_digest;
         if (!expectedNonceDigest) throw invalidChallenge();
         let identity;
@@ -99,6 +136,11 @@ export function createAccountDeletionReauth({
           throw reauthFailed();
         }
         providerSubject = identity.subject;
+      } else {
+        if (challenge.google_callback_status !== 'verified' ||
+            !challenge.google_verified_subject) throw invalidChallenge();
+        expectedNonceDigest = challenge.nonce_digest;
+        providerSubject = challenge.google_verified_subject;
       }
 
       const authorization = randomBytes(32).toString('base64url');
@@ -117,6 +159,48 @@ export function createAccountDeletionReauth({
         throw error;
       }
       return { deletionAuthorization: authorization, expiresAt: grant.expires_at.toISOString() };
+    },
+
+    async googleCallback({ state, code, error } = {}) {
+      if (!googleDeletionOAuthConfigIsComplete(googleOAuthConfig) ||
+          typeof state !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(state)) return false;
+      let claimed;
+      try {
+        claimed = await claimGoogleDeletionCallback(sha256(state));
+      } catch {
+        return false;
+      }
+      if (!claimed) return false;
+      try {
+        if (error !== undefined || typeof code !== 'string' ||
+            !code || code.length > 16_384 ||
+            claimed.google_oauth_client_id !== googleOAuthConfig.GOOGLE_DELETION_OAUTH_CLIENT_ID ||
+            claimed.google_oauth_redirect_uri !== googleOAuthConfig.GOOGLE_DELETION_OAUTH_REDIRECT_URI) {
+          throw reauthFailed();
+        }
+        const idToken = await googleCodeExchange({
+          code,
+          clientId: claimed.google_oauth_client_id,
+          clientSecret: googleOAuthConfig.GOOGLE_DELETION_OAUTH_CLIENT_SECRET,
+          redirectUri: claimed.google_oauth_redirect_uri,
+          codeVerifier: claimed.google_pkce_verifier
+        });
+        const identity = await googleTokenVerifier(idToken, {
+          expectedNonceDigest: claimed.nonce_digest,
+          issuedAfter: claimed.created_at,
+          clientId: claimed.google_oauth_client_id
+        });
+        await completeGoogleDeletionCallback({
+          id: claimed.id, userId: claimed.user_id, sessionId: claimed.session_id,
+          subject: identity.subject, expectedNonceDigest: claimed.nonce_digest
+        });
+        return true;
+      } catch {
+        // A code may have been redeemed even if the exchange timed out. This
+        // callback is terminal: never retry the same code or challenge.
+        try { await failGoogleDeletionCallback(claimed.id); } catch { /* fail closed */ }
+        return false;
+      }
     }
   };
 }

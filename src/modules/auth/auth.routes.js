@@ -4,6 +4,7 @@ import { authenticate, authenticateAllowUnverified, authenticateForLogout } from
 import {
   authCodeRequestRateLimiter, authCodeVerifyRateLimiter,
   authAppleRateLimiter,
+  authGoogleDeletionCallbackRateLimiter,
   authGoogleRateLimiter, authIdentityManagementRateLimiter,
   authLoginRateLimiter, authRefreshRateLimiter, authRegisterRateLimiter
 } from '../../middlewares/rateLimit.js';
@@ -31,11 +32,19 @@ import { deleteAccount } from './accountDeletion.service.js';
 
 export function createAuthRouter(emailService = transactionalEmail, {
   googleVerifier = verifyGoogleIdToken,
-  appleVerifier = verifyAppleIdToken
+  appleVerifier = verifyAppleIdToken,
+  googleDeletionOAuthConfig,
+  googleDeletionCodeExchange,
+  googleDeletionTokenVerifier
 } = {}) {
   const router = Router();
   const identityManagement = createIdentityManagement({ googleVerifier, appleVerifier });
-  const accountDeletionReauth = createAccountDeletionReauth({ appleVerifier });
+  const accountDeletionReauth = createAccountDeletionReauth({
+    appleVerifier,
+    googleOAuthConfig: googleDeletionOAuthConfig,
+    googleCodeExchange: googleDeletionCodeExchange,
+    googleTokenVerifier: googleDeletionTokenVerifier
+  });
 
   router.post('/auth/register', authRegisterRateLimiter, validate(registerSchema), register);
   router.post('/auth/login', authLoginRateLimiter, validate(loginSchema), login);
@@ -54,6 +63,16 @@ export function createAuthRouter(emailService = transactionalEmail, {
   router.post('/auth/account/reauth/verify', authIdentityManagementRateLimiter,
     authenticateAllowUnverified, validate(accountDeletionReauthVerifySchema), async (req, res) => {
       res.status(200).json({ data: await accountDeletionReauth.verify(req.auth, req.validated.body) });
+    });
+  router.get('/auth/account/reauth/google/callback', authGoogleDeletionCallbackRateLimiter,
+    async (req, res) => {
+      const completed = await accountDeletionReauth.googleCallback(req.query);
+      const message = completed
+        ? 'Verification complete. Return to ChainBell to continue.'
+        : 'Verification could not be completed. Return to ChainBell and try again.';
+      res.status(completed ? 200 : 400).set('Cache-Control', 'no-store')
+        .set('Referrer-Policy', 'no-referrer').type('html')
+        .send(`<!doctype html><html><body><p>${message}</p></body></html>`);
     });
   router.delete('/auth/account', authIdentityManagementRateLimiter,
     authenticateAllowUnverified, validate(accountDeletionSchema), async (req, res) => {

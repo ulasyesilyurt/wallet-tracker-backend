@@ -39,6 +39,9 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
   GOOGLE_AUTH_ENABLED: authEnabledSchema,
   GOOGLE_CLIENT_IDS: clientIdsSchema,
+  GOOGLE_DELETION_OAUTH_CLIENT_ID: z.string().trim().default(''),
+  GOOGLE_DELETION_OAUTH_CLIENT_SECRET: z.string().trim().default(''),
+  GOOGLE_DELETION_OAUTH_REDIRECT_URI: z.string().trim().default(''),
   APPLE_AUTH_ENABLED: authEnabledSchema,
   APPLE_CLIENT_IDS: clientIdsSchema,
   AUTH_EMAIL_DELIVERY_MODE: z.enum(['disabled', 'resend']).default('disabled'),
@@ -56,6 +59,7 @@ const envSchema = z.object({
   AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
   AUTH_LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
   AUTH_GOOGLE_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
+  AUTH_GOOGLE_DELETION_CALLBACK_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
   AUTH_APPLE_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
   AUTH_IDENTITY_MANAGEMENT_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(20),
   AUTH_REFRESH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
@@ -154,6 +158,22 @@ const envSchema = z.object({
   ETHEREUM_TRACE_TO_ADDRESS: z.string().optional(),
   ETHEREUM_TRACE_TX_HASH: z.string().optional()
 }).superRefine((config, context) => {
+  if (config.GOOGLE_DELETION_OAUTH_REDIRECT_URI) {
+    try {
+      const redirect = new URL(config.GOOGLE_DELETION_OAUTH_REDIRECT_URI);
+      if (redirect.protocol !== 'https:' ||
+          redirect.pathname !== '/api/v1/auth/account/reauth/google/callback' ||
+          redirect.search || redirect.hash || redirect.username || redirect.password) {
+        throw new Error('Invalid Google deletion callback URI');
+      }
+    } catch {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['GOOGLE_DELETION_OAUTH_REDIRECT_URI'],
+        message: 'GOOGLE_DELETION_OAUTH_REDIRECT_URI must be HTTPS and target the exact backend callback path'
+      });
+    }
+  }
   for (const provider of ['GOOGLE', 'APPLE']) {
     const idsKey = `${provider}_CLIENT_IDS`;
     const ids = config[idsKey];

@@ -51,16 +51,16 @@ async function requireAvailableMethod(client, user, userId, method) {
     if (!user.password_hash) throw methodUnavailable();
     return;
   }
-  if (method !== 'apple') throw methodUnavailable();
+  if (method !== 'apple' && method !== 'google') throw methodUnavailable();
   const identity = await client.query(`
     SELECT provider_subject FROM auth_identities
-    WHERE user_id = $1 AND provider = 'apple'
-  `, [userId]);
+    WHERE user_id = $1 AND provider = $2
+  `, [userId, method]);
   if (!identity.rows[0]) throw methodUnavailable();
   return identity.rows[0].provider_subject;
 }
 
-export function issueAccountDeletionChallenge({ id, userId, sessionId, method, nonceDigest }) {
+export function issueAccountDeletionChallenge({ id, userId, sessionId, method, nonceDigest, googleOAuth = null }) {
   return withLockedAccount(userId, sessionId, async (client, user) => {
     await requireAvailableMethod(client, user, userId, method);
     // Keep only the recent per-account issuance history needed for throttling.
@@ -80,7 +80,15 @@ export function issueAccountDeletionChallenge({ id, userId, sessionId, method, n
       throw new HttpError(429, 'RATE_LIMITED', 'Too many account reauthentication attempts. Please try again later.');
     }
     await client.query(`
-      UPDATE account_deletion_reauth_challenges SET consumed_at = clock_timestamp()
+      UPDATE account_deletion_reauth_challenges SET consumed_at = clock_timestamp(),
+        google_pkce_verifier = NULL,
+        google_callback_status = CASE
+          WHEN method = 'google' AND google_callback_status IN ('pending', 'exchanging') THEN 'failed'
+          ELSE google_callback_status END,
+        google_callback_completed_at = CASE
+          WHEN method = 'google' AND google_callback_status IN ('pending', 'exchanging')
+            THEN clock_timestamp()
+          ELSE google_callback_completed_at END
       WHERE session_id = $1 AND operation = $2 AND consumed_at IS NULL
     `, [sessionId, OPERATION]);
     await client.query(`
@@ -89,11 +97,17 @@ export function issueAccountDeletionChallenge({ id, userId, sessionId, method, n
     `, [sessionId, OPERATION]);
     const result = await client.query(`
       INSERT INTO account_deletion_reauth_challenges
-        (id, user_id, session_id, operation, method, nonce_digest, expires_at)
+        (id, user_id, session_id, operation, method, nonce_digest, expires_at,
+          google_state_digest, google_pkce_verifier, google_oauth_client_id,
+          google_oauth_redirect_uri, google_callback_status)
       VALUES ($1, $2, $3, $4, $5, $6,
-        clock_timestamp() + ($7::int * INTERVAL '1 second'))
+        clock_timestamp() + ($7::int * INTERVAL '1 second'),
+        $8, $9, $10, $11, $12)
       RETURNING expires_at
-    `, [id, userId, sessionId, OPERATION, method, nonceDigest, TTL_SECONDS]);
+    `, [id, userId, sessionId, OPERATION, method, nonceDigest, TTL_SECONDS,
+      googleOAuth?.stateDigest ?? null, googleOAuth?.codeVerifier ?? null,
+      googleOAuth?.clientId ?? null, googleOAuth?.redirectUri ?? null,
+      googleOAuth ? 'pending' : null]);
     return result.rows[0];
   });
 }
@@ -101,6 +115,7 @@ export function issueAccountDeletionChallenge({ id, userId, sessionId, method, n
 export async function readAccountDeletionChallenge({ id, userId, sessionId }) {
   const result = await query(`
     SELECT c.id, c.method, c.nonce_digest, c.created_at, c.expires_at,
+      c.google_callback_status, c.google_verified_subject,
       c.expires_at <= clock_timestamp() AS expired,
       c.consumed_at, c.attempts, u.password_hash, s.revoked_at
     FROM account_deletion_reauth_challenges c
@@ -110,6 +125,58 @@ export async function readAccountDeletionChallenge({ id, userId, sessionId }) {
       AND c.operation = $4
   `, [id, userId, sessionId, OPERATION]);
   return result.rows[0] ?? null;
+}
+
+// The high-entropy state digest is the only callback lookup key. This atomic
+// claim prevents duplicate callbacks from redeeming the same code/challenge.
+export async function claimGoogleDeletionCallback(stateDigest) {
+  const result = await query(`
+    UPDATE account_deletion_reauth_challenges c
+    SET google_callback_status = 'exchanging'
+    FROM auth_sessions s
+    WHERE c.google_state_digest = $1 AND c.method = 'google'
+      AND c.operation = $2 AND c.google_callback_status = 'pending'
+      AND c.consumed_at IS NULL AND c.expires_at > clock_timestamp()
+      AND s.id = c.session_id AND s.user_id = c.user_id AND s.revoked_at IS NULL
+    RETURNING c.id, c.user_id, c.session_id, c.nonce_digest, c.created_at,
+      c.google_pkce_verifier, c.google_oauth_client_id, c.google_oauth_redirect_uri
+  `, [stateDigest, OPERATION]);
+  return result.rows[0] ?? null;
+}
+
+export function failGoogleDeletionCallback(id) {
+  return query(`
+    UPDATE account_deletion_reauth_challenges
+    SET google_callback_status = 'failed', google_pkce_verifier = NULL,
+      google_callback_completed_at = clock_timestamp()
+    WHERE id = $1 AND method = 'google' AND google_callback_status = 'exchanging'
+  `, [id]);
+}
+
+export function completeGoogleDeletionCallback({ id, userId, sessionId, subject, expectedNonceDigest }) {
+  return withLockedAccount(userId, sessionId, async (client, user) => {
+    const linkedSubject = await requireAvailableMethod(client, user, userId, 'google');
+    if (linkedSubject !== subject) {
+      throw new HttpError(401, 'AUTH_REAUTH_FAILED', 'Current account proof is invalid.');
+    }
+    const result = await client.query(`
+      SELECT nonce_digest, consumed_at, expires_at <= clock_timestamp() AS expired,
+        google_callback_status
+      FROM account_deletion_reauth_challenges
+      WHERE id = $1 AND user_id = $2 AND session_id = $3
+        AND operation = $4 AND method = 'google' FOR UPDATE
+    `, [id, userId, sessionId, OPERATION]);
+    const challenge = result.rows[0];
+    if (!challenge || challenge.consumed_at || challenge.expired ||
+        challenge.google_callback_status !== 'exchanging' ||
+        !challenge.nonce_digest?.equals(expectedNonceDigest)) throw invalidChallenge();
+    await client.query(`
+      UPDATE account_deletion_reauth_challenges
+      SET google_callback_status = 'verified', google_verified_subject = $2,
+        google_callback_completed_at = clock_timestamp(), google_pkce_verifier = NULL
+      WHERE id = $1
+    `, [id, subject]);
+  });
 }
 
 export async function recordFailedAccountDeletionProof({ id, userId, sessionId }) {
@@ -128,7 +195,7 @@ export function completeAccountDeletionReauth({
   return withLockedAccount(userId, sessionId, async (client, user) => {
     const result = await client.query(`
       SELECT method, nonce_digest, expires_at <= clock_timestamp() AS expired,
-        consumed_at, attempts
+        consumed_at, attempts, google_callback_status, google_verified_subject
       FROM account_deletion_reauth_challenges
       WHERE id = $1 AND user_id = $2 AND session_id = $3 AND operation = $4
       FOR UPDATE
@@ -144,6 +211,14 @@ export function completeAccountDeletionReauth({
       throw new HttpError(401, 'AUTH_REAUTH_FAILED', 'Current account proof is invalid.');
     }
     if (method === 'apple' && (
+      linkedSubject !== providerSubject ||
+      !challenge.nonce_digest?.equals(expectedNonceDigest)
+    )) {
+      throw new HttpError(401, 'AUTH_REAUTH_FAILED', 'Current account proof is invalid.');
+    }
+    if (method === 'google' && (
+      challenge.google_callback_status !== 'verified' ||
+      challenge.google_verified_subject !== providerSubject ||
       linkedSubject !== providerSubject ||
       !challenge.nonce_digest?.equals(expectedNonceDigest)
     )) {
@@ -166,7 +241,7 @@ export function completeAccountDeletionReauth({
         clock_timestamp() + ($7::int * INTERVAL '1 second'))
       RETURNING expires_at
     `, [authorizationDigest, userId, sessionId, OPERATION,
-      method, method === 'apple' ? providerSubject : null, TTL_SECONDS]);
+      method, method === 'password' ? null : providerSubject, TTL_SECONDS]);
     return grant.rows[0];
   });
 }

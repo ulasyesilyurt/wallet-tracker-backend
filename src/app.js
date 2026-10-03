@@ -46,7 +46,9 @@ export function createApp(runtimeOptions = {}, networkConfig = env) {
   );
   app.use(
     pinoHttp({
-      logger
+      logger,
+      // OAuth callbacks carry a one-time code and state in the query string.
+      autoLogging: { ignore: (req) => req.path === '/api/v1/auth/account/reauth/google/callback' }
     })
   );
 

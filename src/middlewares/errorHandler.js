@@ -6,7 +6,7 @@ export function notFoundHandler(req, res) {
   res.status(404).json({
     error: {
       code: 'NOT_FOUND',
-      message: `Route ${req.method} ${req.originalUrl} not found`
+      message: `Route ${req.method} ${req.path} not found`
     }
   });
 }
@@ -29,7 +29,7 @@ export function errorHandler(error, req, res, next) {
   if (error?.statusCode === 401 || error?.statusCode === 404) {
     logger.info(
       {
-        path: req.originalUrl,
+        path: req.path,
         statusCode: error.statusCode,
         code: error.code,
         message: error.message
@@ -38,7 +38,7 @@ export function errorHandler(error, req, res, next) {
     );
   } else {
     logger.error(
-      { ...safeErrorDetails(error), path: req.originalUrl },
+      { ...safeErrorDetails(error), path: req.path },
       'Unhandled request error'
     );
   }

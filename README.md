@@ -226,12 +226,31 @@ rate-limit window). Existing email verification rules still apply.
 
 ### Permanent account deletion
 
-Apply migration `026_account_deletion_reauth.sql` before enabling deletion.
+Apply migrations `026_account_deletion_reauth.sql` and
+`027_google_deletion_oauth.sql` before enabling deletion.
 `POST /api/v1/auth/account/reauth/challenge` and
 `POST /api/v1/auth/account/reauth/verify` issue a five-minute, session-bound
 deletion authorization after current password proof or a server-nonce-bound
-Apple identity token. Google deletion reauthentication is unavailable; a
-Google-only account cannot yet obtain this authorization.
+Apple identity token. Google deletion reauthentication uses a separate,
+backend-owned OAuth authorization-code flow. Configure
+`GOOGLE_DELETION_OAUTH_CLIENT_ID`, `GOOGLE_DELETION_OAUTH_CLIENT_SECRET`, and
+`GOOGLE_DELETION_OAUTH_REDIRECT_URI` for one Google web OAuth client. Register
+the exact HTTPS redirect URI in Google Cloud Console; its path must be
+`/api/v1/auth/account/reauth/google/callback`. Missing configuration makes
+Google deletion proof unavailable. This is separate from `GOOGLE_CLIENT_IDS`
+and ordinary Google sign-in.
+
+For Google, the challenge response contains `challengeId`, `method`,
+`expiresAt`, and `authorizationUrl`. Open that URL in the system browser.
+Google returns to the public backend callback, which records verified proof
+without returning a deletion authorization or authenticating the browser.
+The app then calls the authenticated verify endpoint with only
+`{"challengeId":"...","method":"google"}` to receive the usual short-lived
+deletion authorization. The callback shows a generic HTML result, so the app
+should wait for browser completion before calling verify. The server stores
+only SHA-256 digests of the OAuth state and raw Google nonce. It temporarily
+stores the PKCE verifier because only the backend exchanges the code; it is
+cleared after a terminal callback. Codes and Google tokens are never stored.
 
 `DELETE /api/v1/auth/account` requires a session-backed Bearer access token
 and JSON body `{"deletionAuthorization":"<opaque authorization>"}`. It accepts

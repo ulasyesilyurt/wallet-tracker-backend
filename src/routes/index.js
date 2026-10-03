@@ -20,7 +20,10 @@ export function createApiRouter({
   getOperationalStatus = async () => ({ status: 'unavailable' }),
   authEmailService,
   authGoogleVerifier,
-  authAppleVerifier
+  authAppleVerifier,
+  authGoogleDeletionOAuthConfig,
+  authGoogleDeletionCodeExchange,
+  authGoogleDeletionTokenVerifier
 } = {}) {
   const router = Router();
 
@@ -50,7 +53,10 @@ export function createApiRouter({
 
   router.use(createAuthRouter(authEmailService, {
     googleVerifier: authGoogleVerifier,
-    appleVerifier: authAppleVerifier
+    appleVerifier: authAppleVerifier,
+    googleDeletionOAuthConfig: authGoogleDeletionOAuthConfig,
+    googleDeletionCodeExchange: authGoogleDeletionCodeExchange,
+    googleDeletionTokenVerifier: authGoogleDeletionTokenVerifier
   }));
   router.use(walletsRouter);
   router.use(deviceTokensRouter);

@@ -16,7 +16,8 @@ function createRateLimiter({
   windowMs,
   limit,
   message,
-  skip
+  skip,
+  handler = buildRateLimitHandler(message)
 }) {
   return rateLimit({
     windowMs,
@@ -24,7 +25,7 @@ function createRateLimiter({
     standardHeaders: true,
     legacyHeaders: false,
     skip,
-    handler: buildRateLimitHandler(message)
+    handler
   });
 }
 
@@ -38,6 +39,15 @@ export const authGoogleRateLimiter = createRateLimiter({
   windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
   limit: env.AUTH_GOOGLE_RATE_LIMIT_MAX,
   message: 'Too many Google sign-in attempts. Please try again later.'
+});
+
+export const authGoogleDeletionCallbackRateLimiter = createRateLimiter({
+  windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_GOOGLE_DELETION_CALLBACK_RATE_LIMIT_MAX,
+  message: 'Too many Google verification attempts. Please try again later.',
+  handler: (_req, res) => res.status(429).set('Cache-Control', 'no-store')
+    .set('Referrer-Policy', 'no-referrer').type('html')
+    .send('<!doctype html><html><body><p>Verification could not be completed.</p><p>Return to ChainBell and try again.</p></body></html>')
 });
 
 export const authAppleRateLimiter = createRateLimiter({

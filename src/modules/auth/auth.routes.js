@@ -13,6 +13,7 @@ import {
   login, me, refresh, register
 } from './auth.controller.js';
 import {
+  accountDeletionReauthChallengeSchema, accountDeletionReauthVerifySchema,
   appleSignInSchema, forgotPasswordSchema, googleSignInSchema,
   linkIdentitySchema, loginSchema, registerSchema, resetPasswordSchema,
   unlinkIdentitySchema, verifyEmailSchema
@@ -25,6 +26,7 @@ import { verifyGoogleIdToken } from './google.verifier.js';
 import { createAppleSignIn } from './apple.service.js';
 import { verifyAppleIdToken } from './apple.verifier.js';
 import { createIdentityManagement } from './identityManagement.service.js';
+import { createAccountDeletionReauth } from './accountDeletionReauth.service.js';
 
 export function createAuthRouter(emailService = transactionalEmail, {
   googleVerifier = verifyGoogleIdToken,
@@ -32,6 +34,7 @@ export function createAuthRouter(emailService = transactionalEmail, {
 } = {}) {
   const router = Router();
   const identityManagement = createIdentityManagement({ googleVerifier, appleVerifier });
+  const accountDeletionReauth = createAccountDeletionReauth({ appleVerifier });
 
   router.post('/auth/register', authRegisterRateLimiter, validate(registerSchema), register);
   router.post('/auth/login', authLoginRateLimiter, validate(loginSchema), login);
@@ -43,6 +46,14 @@ export function createAuthRouter(emailService = transactionalEmail, {
     validate(linkIdentitySchema), createIdentityLinkController(identityManagement));
   router.delete('/auth/identities/:provider', authIdentityManagementRateLimiter, authenticate,
     validate(unlinkIdentitySchema), createIdentityUnlinkController(identityManagement));
+  router.post('/auth/account/reauth/challenge', authIdentityManagementRateLimiter,
+    authenticateAllowUnverified, validate(accountDeletionReauthChallengeSchema), async (req, res) => {
+      res.status(201).json({ data: await accountDeletionReauth.challenge(req.auth, req.validated.body) });
+    });
+  router.post('/auth/account/reauth/verify', authIdentityManagementRateLimiter,
+    authenticateAllowUnverified, validate(accountDeletionReauthVerifySchema), async (req, res) => {
+      res.status(200).json({ data: await accountDeletionReauth.verify(req.auth, req.validated.body) });
+    });
   router.post('/auth/refresh', authRefreshRateLimiter, refresh);
   router.post('/auth/logout', authenticateForLogout, async (req, res) => {
     res.status(200).json({ data: await logoutUser(req.auth) });

@@ -64,3 +64,29 @@ export const forgotPasswordSchema = z.object({ body: z.object({ email: emailSche
 export const resetPasswordSchema = z.object({
   body: z.object({ email: emailSchema, code: codeSchema, newPassword: passwordSchema })
 });
+
+const deletionReauthMethod = z.enum(['password', 'apple', 'google']);
+const deletionChallengeId = z.string().uuid();
+
+export const accountDeletionReauthChallengeSchema = z.object({
+  body: z.object({ method: deletionReauthMethod }).strict()
+});
+
+export const accountDeletionReauthVerifySchema = z.object({
+  body: z.discriminatedUnion('method', [
+    z.object({
+      challengeId: deletionChallengeId,
+      method: z.literal('password'),
+      currentPassword: z.string().min(1).max(1024)
+    }).strict(),
+    z.object({
+      challengeId: deletionChallengeId,
+      method: z.literal('apple'),
+      identityToken: z.string().min(1).max(16_384)
+    }).strict(),
+    z.object({
+      challengeId: deletionChallengeId,
+      method: z.literal('google')
+    }).strict()
+  ])
+});

@@ -17,7 +17,7 @@ function nonceMatches(actual, expected) {
 export function createAppleIdTokenVerifier({ config = env, keyResolver = appleKeys } = {}) {
   // expectedNonce is the exact value placed in Apple's signed nonce claim. If the
   // client hashes a raw nonce before authorization, pass that hash here.
-  return async function verifyAppleIdToken(token, { expectedNonce } = {}) {
+  return async function verifyAppleIdToken(token, { expectedNonce, issuedAfter } = {}) {
     const clientIds = config.APPLE_CLIENT_IDS;
     requireProviderConfig(config.APPLE_AUTH_ENABLED, clientIds);
     if (typeof expectedNonce !== 'string' || expectedNonce === '') throw invalidProviderToken();
@@ -26,6 +26,15 @@ export function createAppleIdTokenVerifier({ config = env, keyResolver = appleKe
       audience: clientIds
     });
     if (!nonceMatches(payload.nonce, expectedNonce)) throw invalidProviderToken();
+    if (issuedAfter !== undefined) {
+      // Deletion reauth uses a server-issued nonce. Check that Apple's signed
+      // token was also issued around this short-lived challenge.
+      const earliest = Math.floor(issuedAfter.getTime() / 1000) - 60;
+      const latest = Math.floor(Date.now() / 1000) + 60;
+      if (!Number.isSafeInteger(payload.iat) || payload.iat < earliest || payload.iat > latest) {
+        throw invalidProviderToken();
+      }
+    }
     return {
       provider: 'apple',
       subject: payload.sub,

@@ -13,7 +13,7 @@ import {
   login, me, refresh, register
 } from './auth.controller.js';
 import {
-  accountDeletionReauthChallengeSchema, accountDeletionReauthVerifySchema,
+  accountDeletionReauthChallengeSchema, accountDeletionReauthVerifySchema, accountDeletionSchema,
   appleSignInSchema, forgotPasswordSchema, googleSignInSchema,
   linkIdentitySchema, loginSchema, registerSchema, resetPasswordSchema,
   unlinkIdentitySchema, verifyEmailSchema
@@ -27,6 +27,7 @@ import { createAppleSignIn } from './apple.service.js';
 import { verifyAppleIdToken } from './apple.verifier.js';
 import { createIdentityManagement } from './identityManagement.service.js';
 import { createAccountDeletionReauth } from './accountDeletionReauth.service.js';
+import { deleteAccount } from './accountDeletion.service.js';
 
 export function createAuthRouter(emailService = transactionalEmail, {
   googleVerifier = verifyGoogleIdToken,
@@ -53,6 +54,10 @@ export function createAuthRouter(emailService = transactionalEmail, {
   router.post('/auth/account/reauth/verify', authIdentityManagementRateLimiter,
     authenticateAllowUnverified, validate(accountDeletionReauthVerifySchema), async (req, res) => {
       res.status(200).json({ data: await accountDeletionReauth.verify(req.auth, req.validated.body) });
+    });
+  router.delete('/auth/account', authIdentityManagementRateLimiter,
+    authenticateAllowUnverified, validate(accountDeletionSchema), async (req, res) => {
+      res.status(200).json({ data: await deleteAccount(req.auth, req.validated.body) });
     });
   router.post('/auth/refresh', authRefreshRateLimiter, refresh);
   router.post('/auth/logout', authenticateForLogout, async (req, res) => {

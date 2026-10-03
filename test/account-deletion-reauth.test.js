@@ -233,8 +233,10 @@ test('method availability and Google fail closed without creating challenges', a
   })).body.error.code, 'AUTH_REAUTH_METHOD_UNAVAILABLE');
   const afterCount = (await query('SELECT COUNT(*)::int AS count FROM account_deletion_reauth_challenges')).rows[0].count;
   assert.equal(afterCount, before);
-  assert.equal((await request(app).delete('/api/v1/auth/account')
-    .set('Authorization', `Bearer ${account.accessToken}`)).status, 404);
+  const missingAuthorization = await request(app).delete('/api/v1/auth/account')
+    .set('Authorization', `Bearer ${account.accessToken}`);
+  assert.equal(missingAuthorization.status, 400);
+  assert.equal(missingAuthorization.body.error.code, 'VALIDATION_ERROR');
 });
 
 test('password proof fails safely on wrong, removed, or changed password', async () => {

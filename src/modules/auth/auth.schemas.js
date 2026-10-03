@@ -90,3 +90,7 @@ export const accountDeletionReauthVerifySchema = z.object({
     }).strict()
   ])
 });
+
+export const accountDeletionSchema = z.object({
+  body: z.object({ deletionAuthorization: z.string().min(1).max(512) }).strict()
+});

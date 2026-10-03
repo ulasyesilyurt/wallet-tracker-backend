@@ -224,6 +224,29 @@ after a successful change; no JWT claims change. Both endpoints share a
 per-IP limit of `AUTH_IDENTITY_MANAGEMENT_RATE_LIMIT_MAX` (default 20 per auth
 rate-limit window). Existing email verification rules still apply.
 
+### Permanent account deletion
+
+Apply migration `026_account_deletion_reauth.sql` before enabling deletion.
+`POST /api/v1/auth/account/reauth/challenge` and
+`POST /api/v1/auth/account/reauth/verify` issue a five-minute, session-bound
+deletion authorization after current password proof or a server-nonce-bound
+Apple identity token. Google deletion reauthentication is unavailable; a
+Google-only account cannot yet obtain this authorization.
+
+`DELETE /api/v1/auth/account` requires a session-backed Bearer access token
+and JSON body `{"deletionAuthorization":"<opaque authorization>"}`. It accepts
+email-unverified users and returns `200 {"data":{"deleted":true}}` after
+the database commits. It rejects legacy sessionless tokens and invalid,
+expired, or already-used authorizations. The endpoint accepts no password or
+provider token. Deletion consumes the authorization and deletes the user in
+one transaction; foreign keys cascade through sessions, identities, wallets,
+devices, caches, and notifications. The transaction marks each affected
+Alchemy chain/address pair dirty. The reconciliation worker later checks
+whether another user still tracks the pair before changing the provider watch.
+Process-local holdings and positions caches may hold inaccessible stale
+entries until their TTL expires; they cannot authorize a deleted account or
+restore its database rows. A push already handed to FCM cannot be recalled.
+
 ### Email verification and password recovery
 
 Phase 2 adds 6-digit, 10-minute email challenges. Migration 020 marked existing email accounts verified; migration 021 preserves access for older accounts without an email, which cannot receive a verification code. Accounts registered afterward start with `user.emailVerified: false`. Registration does not send a code automatically: the client calls the verification request endpoint when its code-entry screen is ready. An unverified token can access `/auth/me`, `/auth/logout`, and the verification request/verify routes, but normal protected application routes return `403 AUTH_EMAIL_VERIFICATION_REQUIRED`. After verification, the same token works on protected routes because each request loads current user state from PostgreSQL.

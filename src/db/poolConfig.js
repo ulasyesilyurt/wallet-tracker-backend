@@ -27,6 +27,11 @@ export function createPoolConfig(config) {
   if (caFile && sslMode !== 'verify-full') {
     throw new Error('DATABASE_SSL_CA_FILE requires DATABASE_SSL_MODE=verify-full');
   }
+  if (sslMode === 'railway-private' &&
+      (url.hostname.length <= '.railway.internal'.length ||
+        !url.hostname.endsWith('.railway.internal') || url.searchParams.has('host'))) {
+    throw new Error('DATABASE_SSL_MODE=railway-private requires a Railway private database host');
+  }
   if (config.NODE_ENV === 'production') {
     const urlSslMode = url.searchParams.get('sslmode');
     const urlSsl = url.searchParams.get('ssl');
@@ -36,8 +41,8 @@ export function createPoolConfig(config) {
     if (urlHasSsl && (urlSslMode ? urlSslMode !== 'verify-full' : !['true', '1'].includes(urlSsl))) {
       throw new Error('Production DATABASE_URL must use sslmode=verify-full or ssl=true');
     }
-    if (!urlHasSsl && sslMode !== 'verify-full') {
-      throw new Error('Production database TLS must use verify-full');
+    if (!urlHasSsl && !['verify-full', 'railway-private'].includes(sslMode)) {
+      throw new Error('Production database TLS must use verify-full or railway-private');
     }
   }
 
@@ -53,6 +58,8 @@ export function createPoolConfig(config) {
   if (!urlHasSsl) {
     if (sslMode === 'disable') {
       poolConfig.ssl = false;
+    } else if (sslMode === 'railway-private') {
+      poolConfig.ssl = { rejectUnauthorized: false };
     } else if (caFile) {
       try {
         poolConfig.ssl = { ca: fs.readFileSync(caFile, 'utf8'), rejectUnauthorized: true };
@@ -73,7 +80,7 @@ export function createPoolConfig(config) {
     application_name: poolConfig.application_name,
     tlsEnabled: urlHasSsl
       ? url.searchParams.get('sslmode') !== 'disable' && !['0', 'false'].includes(url.searchParams.get('ssl'))
-      : sslMode === 'verify-full'
+      : sslMode !== 'disable'
   });
 
   return poolConfig;

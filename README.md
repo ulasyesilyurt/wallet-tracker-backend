@@ -692,7 +692,12 @@ Use PostgreSQL with:
 - Restore testing
 - Sufficient connection capacity
 
-In production, database TLS verification is required.
+Production defaults to verified database TLS. For Railway's private
+`*.railway.internal` database URL when its CA is unavailable to the backend,
+set `DATABASE_SSL_MODE=railway-private`. This keeps PostgreSQL TLS enabled but
+does not verify the database certificate; it relies on Railway's encrypted,
+environment-isolated private network. The mode rejects other hosts and URL
+SSL parameters. Use `verify-full` with a trusted CA when one is available.
 
 Example:
 

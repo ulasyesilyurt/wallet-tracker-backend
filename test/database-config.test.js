@@ -9,6 +9,7 @@ import { createPoolConfig } from '../src/db/poolConfig.js';
 
 const secret = 'never-print-this-database-password';
 const databaseUrl = `postgresql://user:${secret}@db.example.test:5432/wallet_tracker`;
+const railwayUrl = databaseUrl.replace('db.example.test', 'postgres.railway.internal');
 
 function config(overrides = {}) {
   return parseEnvironment({
@@ -63,6 +64,18 @@ test('production defaults to verified TLS and accepts a CA file', () => {
   }
 });
 
+test('Railway private mode enables TLS only for a Railway private database host', () => {
+  const railway = createPoolConfig(config({
+    NODE_ENV: 'production',
+    DATABASE_URL: railwayUrl,
+    DATABASE_SSL_MODE: 'railway-private'
+  }));
+  assert.deepEqual(railway.ssl, { rejectUnauthorized: false });
+  assert.deepEqual(new pg.Client(railway).connectionParameters.ssl, { rejectUnauthorized: false });
+  assert.match(JSON.stringify(railway), /"tlsEnabled":true/);
+  assert.equal(JSON.stringify(railway).includes(secret), false);
+});
+
 test('URL TLS parameters are left to pg without competing pool TLS settings', () => {
   const fromUrl = createPoolConfig(config({
     NODE_ENV: 'production',
@@ -79,6 +92,19 @@ test('URL TLS parameters are left to pg without competing pool TLS settings', ()
 test('unsafe or conflicting TLS settings fail without disclosing credentials', () => {
   const cases = [
     () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_SSL_MODE: 'disable' })),
+    () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_SSL_MODE: 'railway-private' })),
+    () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_SSL_MODE: 'railway-private',
+      DATABASE_URL: railwayUrl.replace('postgres.railway.internal', 'railway.internal') })),
+    () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_SSL_MODE: 'railway-private',
+      DATABASE_URL: railwayUrl.replace('postgres.railway.internal', '.railway.internal') })),
+    () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_SSL_MODE: 'railway-private',
+      DATABASE_URL: railwayUrl.replace('postgres.railway.internal', 'postgres.railway.internal.evil.test') })),
+    () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_SSL_MODE: 'railway-private',
+      DATABASE_URL: `${railwayUrl}?host=db.example.test` })),
+    () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_SSL_MODE: 'railway-private',
+      DATABASE_URL: `${railwayUrl}?sslmode=verify-full` })),
+    () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_SSL_MODE: 'railway-private',
+      DATABASE_URL: railwayUrl, DATABASE_SSL_CA_FILE: '/missing/private-ca.pem' })),
     () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_URL: `${databaseUrl}?sslmode=disable` })),
     () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_URL: `${databaseUrl}?sslmode=no-verify` })),
     () => createPoolConfig(config({ NODE_ENV: 'production', DATABASE_URL: `${databaseUrl}?sslmode=verify-full&ssl=false` })),

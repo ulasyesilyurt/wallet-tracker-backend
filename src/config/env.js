@@ -25,8 +25,8 @@ const envSchema = z.object({
   ALCHEMY_TOKEN_BALANCE_MAX_PAGES: z.coerce.number().int().min(1).max(100).default(5),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   DATABASE_SSL_MODE: z.string().refine(
-    (value) => ['disable', 'verify-full'].includes(value),
-    'DATABASE_SSL_MODE must be disable or verify-full'
+    (value) => ['disable', 'verify-full', 'railway-private'].includes(value),
+    'DATABASE_SSL_MODE must be disable, verify-full, or railway-private'
   ).optional(),
   DATABASE_SSL_CA_FILE: z.string().optional(),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),

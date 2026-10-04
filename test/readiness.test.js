@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
@@ -11,7 +11,8 @@ process.env.JWT_SECRET ??= 'dev_jwt_secret_that_is_long_enough_for_local_checks'
 
 const supertest = (await import('supertest')).default;
 const { createApp } = await import('../src/app.js');
-const { checkDatabaseReadiness } = await import('../src/db/readiness.js');
+const { checkDatabaseReadiness, databaseReadinessErrorDetails } =
+  await import('../src/db/readiness.js');
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function createProductionEnvironment(overrides = {}) {
@@ -103,6 +104,62 @@ test('database check is a bounded SELECT 1 and readiness hides raw errors', asyn
   assert.equal(response.status, 503);
   assert.deepEqual(response.body, { status: 'not_ready' });
   assert.equal(JSON.stringify(response.body).includes('connection secret'), false);
+});
+
+test('readiness diagnostics expose only safe error fields and fixed categories', () => {
+  const categories = new Map([
+    ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'tls_certificate_trust'],
+    ['SELF_SIGNED_CERT_IN_CHAIN', 'tls_certificate_trust'],
+    ['DEPTH_ZERO_SELF_SIGNED_CERT', 'tls_certificate_trust'],
+    ['ERR_TLS_CERT_ALTNAME_INVALID', 'tls_hostname_mismatch'],
+    ['ENOTFOUND', 'dns'],
+    ['EAI_AGAIN', 'dns'],
+    ['ECONNREFUSED', 'connection_refused'],
+    ['ETIMEDOUT', 'timeout'],
+    ['28P01', 'authentication_failed'],
+    ['3D000', 'database_not_found']
+  ]);
+  const secret = 'private-user private-password private-host';
+  for (const [code, category] of categories) {
+    const error = Object.assign(new Error(secret), { code, connectionString: secret,
+      query: 'SELECT private_value', parameters: [secret] });
+    assert.deepEqual(databaseReadinessErrorDetails(error), {
+      errorName: 'Error', errorCode: code, category
+    });
+  }
+  for (const message of ['Database readiness timeout', 'Query read timeout']) {
+    assert.deepEqual(databaseReadinessErrorDetails(new Error(message)), {
+      errorName: 'Error', errorCode: null, category: 'timeout'
+    });
+  }
+  assert.deepEqual(databaseReadinessErrorDetails(Object.assign(new Error(secret), {
+    name: 'PrivatePasswordError', code: 'PRIVATE_PASSWORD', stack: secret
+  })), { errorName: 'Error', errorCode: null, category: 'unknown' });
+  assert.deepEqual(databaseReadinessErrorDetails(Object.assign(new Error(secret), {
+    name: 'DatabaseError', code: '28P01'
+  })), { errorName: 'DatabaseError', errorCode: '28P01', category: 'authentication_failed' });
+});
+
+test('readiness warning omits hostname and raw connection details', () => {
+  const script = `
+    import { checkDatabaseReadiness } from './src/db/readiness.js';
+    await checkDatabaseReadiness({ dbPool: { query: async () => {
+      const error = new Error('private-user private-password private-host');
+      error.code = 'ECONNREFUSED';
+      throw error;
+    } } });
+  `;
+  const output = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: repoRoot, encoding: 'utf8', env: { ...process.env, LOG_LEVEL: 'warn' }
+  });
+  const warning = JSON.parse(output.trim());
+  assert.deepEqual(Object.keys(warning).sort(),
+    ['level', 'time', 'msg', 'errorName', 'errorCode', 'category'].sort());
+  assert.deepEqual([warning.errorName, warning.errorCode, warning.category],
+    ['Error', 'ECONNREFUSED', 'connection_refused']);
+  assert.equal(output.includes('private-user'), false);
+  assert.equal(output.includes('private-password'), false);
+  assert.equal(output.includes('private-host'), false);
 });
 
 test('readiness reports a worker that has not started or is shutting down', async () => {
